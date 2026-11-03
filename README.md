@@ -7,6 +7,10 @@ not by HTML link order, lexical order or directory modification time.
 After BIOS packaging, it reads that archive's MMC firmware version and
 downloads/packages the exact matching MMC build, not the newest unrelated version.
 
+For an offline Chinese workflow diagram, commands and cleanup/error rules, open
+[packaging-workflow.html](packaging-workflow.html) in a browser. It is self-contained
+and supports printing or saving as PDF.
+
 For example, `OAKSTRM.0.RPB.0040.D.79/` becomes:
 
 ```text
