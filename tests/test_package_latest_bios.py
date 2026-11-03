@@ -80,26 +80,22 @@ class PackagingTests(unittest.TestCase):
         (self.source / "7-Zip").mkdir()
         (self.source / "restructure_new.py").touch()
         (self.source / "7-Zip" / "7z.exe").touch()
-        self.original_workspace = self.root / "manual-work"
-        self.original_workspace.mkdir()
-        self.marker = self.original_workspace / "keep.txt"
-        self.marker.write_text("manual build", encoding="utf-8")
+        self.workspace = self.root / "ATF"
         self.config_file = self.source / "Config" / "config_oak_ap.ini"
         self.original_config = (
-            f"[work_space]\nwork_space = {self.original_workspace}\n"
+            f"[work_space]\nwork_space = {self.workspace}\n"
             "excel_file = inputs.xlsx\ndownload_retry = 3\n"
             "[Options]\nPreserveCase = original\n"
         )
         self.config_file.write_text(self.original_config, encoding="utf-8")
         self.output = self.root / "output"
         self.logs = self.root / "logs"
-        self.legacy_cache = self.root / "ATF"
-        self.cached_build = self.legacy_cache / "0040D77"
+        self.cached_build = self.workspace / "0040D77"
         self.cached_build.mkdir(parents=True)
         self.cached_file = self.cached_build / "download.7z"
         self.cached_file.write_bytes(b"old download")
         cache_patch = mock.patch.object(
-            packager, "LEGACY_CACHE_DIR", self.legacy_cache
+            packager, "WORKSPACE_DIR", self.workspace
         )
         cache_patch.start()
         self.addCleanup(cache_patch.stop)
@@ -128,23 +124,25 @@ class PackagingTests(unittest.TestCase):
         options = dict(argument[2:].split("=", 1) for argument in command[3:])
         self.assertEqual(options["bios"], "0040D79")
         self.assertEqual(options["package_fdr_file"], "0040.D79.7z")
-        config_path = Path(options["config_ini"])
-        self.assertTrue(config_path.is_absolute())
+        self.assertEqual(options["config_ini"], "config_oak_ap.ini")
+        self.assertEqual(Path(options["file_path"]), self.output)
         config = configparser.ConfigParser()
-        config.read(config_path, encoding="utf-8")
+        config.read(self.config_file, encoding="utf-8")
         workspace = Path(config["work_space"]["work_space"])
-        staging = Path(options["file_path"])
         downloaded_archive = workspace / self.build.bios_id / "download.7z"
         legacy_extraction_path = Path(str(downloaded_archive).split(".")[0])
         self.assertEqual(
             legacy_extraction_path, downloaded_archive.with_suffix("")
         )
-        self.assertNotEqual(workspace, self.original_workspace)
-        self.assertNotEqual(staging, self.output)
-        self.assertEqual(workspace.parent, staging.parent)
+        self.assertEqual(workspace, self.workspace)
         self.assertEqual(config["Options"]["PreserveCase"], "original")
-        self.assertTrue(staging.is_dir())
-        (staging / self.build.package_name).write_bytes(b"packaged BIOS")
+        self.assertEqual(self.config_file.read_text(), self.original_config)
+        workspace.mkdir(parents=True, exist_ok=True)
+        (workspace / "build.tmp").write_bytes(b"working data")
+        if self.output.exists():
+            shutil.rmtree(self.output)
+        self.output.mkdir()
+        (self.output / self.build.package_name).write_bytes(b"packaged BIOS")
         return subprocess.CompletedProcess(command, 0)
 
     @mock.patch.object(packager.subprocess, "run")
@@ -157,7 +155,7 @@ class PackagingTests(unittest.TestCase):
 
     @mock.patch.object(packager, "validate_archive")
     @mock.patch.object(packager.subprocess, "run")
-    def test_success_isolates_destructive_paths_and_preserves_old_data(
+    def test_success_uses_original_paths_and_keeps_only_latest_archive(
         self, run: mock.Mock, validate: mock.Mock
     ) -> None:
         self.output.mkdir()
@@ -166,66 +164,66 @@ class PackagingTests(unittest.TestCase):
         run.side_effect = self.fake_packager
         destination = self.package()
         self.assertEqual(destination.read_bytes(), b"packaged BIOS")
-        self.assertEqual(old_archive.read_bytes(), b"previous BIOS")
-        self.assertEqual(self.marker.read_text(), "manual build")
+        self.assertFalse(old_archive.exists())
+        self.assertEqual(list(self.workspace.iterdir()), [])
         self.assertEqual(self.config_file.read_text(), self.original_config)
         validate.assert_called_once()
-        self.assertFalse(list(self.output.glob("packaging-*")))
-        self.assertFalse(self.legacy_cache.exists())
+        self.assertEqual(list(self.output.iterdir()), [destination])
 
     @mock.patch.object(packager, "validate_archive")
     @mock.patch.object(packager.subprocess, "run")
-    def test_valid_existing_archive_is_verified_and_skipped(
+    def test_existing_archive_still_runs_original_command(
         self, run: mock.Mock, validate: mock.Mock
     ) -> None:
         self.output.mkdir()
         destination = self.output / self.build.package_name
         destination.write_bytes(b"existing BIOS")
+        run.side_effect = self.fake_packager
         self.assertEqual(self.package(), destination)
         validate.assert_called_once_with(
             destination, self.source / "7-Zip" / "7z.exe"
         )
-        run.assert_not_called()
-        self.assertEqual(destination.read_bytes(), b"existing BIOS")
-        self.assertFalse(self.legacy_cache.exists())
+        run.assert_called_once()
+        self.assertEqual(destination.read_bytes(), b"packaged BIOS")
+        self.assertEqual(list(self.workspace.iterdir()), [])
 
     @mock.patch.object(packager, "validate_archive")
     @mock.patch.object(packager.subprocess, "run")
-    def test_invalid_existing_archive_is_not_overwritten(
+    def test_invalid_existing_archive_is_replaced_by_original_command(
         self, run: mock.Mock, validate: mock.Mock
     ) -> None:
         self.output.mkdir()
         destination = self.output / self.build.package_name
         destination.write_bytes(b"corrupt")
-        validate.side_effect = RuntimeError("CRC failed")
-        with self.assertRaisesRegex(RuntimeError, "CRC failed"):
-            self.package()
-        run.assert_not_called()
-        self.assertEqual(destination.read_bytes(), b"corrupt")
-        self.assertEqual(self.cached_file.read_bytes(), b"old download")
+        run.side_effect = self.fake_packager
+        self.assertEqual(self.package(), destination)
+        run.assert_called_once()
+        validate.assert_called_once()
+        self.assertEqual(destination.read_bytes(), b"packaged BIOS")
+        self.assertEqual(list(self.workspace.iterdir()), [])
 
     @mock.patch.object(packager.subprocess, "run")
-    def test_child_failure_publishes_nothing_and_cleans_only_its_job(
+    def test_child_failure_does_not_clear_workspace(
         self, run: mock.Mock
     ) -> None:
         run.side_effect = subprocess.CalledProcessError(2, ["fake packager"])
         with self.assertRaises(subprocess.CalledProcessError):
             self.package()
         self.assertEqual(list(self.output.iterdir()), [])
-        self.assertEqual(self.marker.read_text(), "manual build")
         self.assertEqual(self.config_file.read_text(), self.original_config)
         self.assertEqual(self.cached_file.read_bytes(), b"old download")
 
     @mock.patch.object(packager, "validate_archive")
     @mock.patch.object(packager.subprocess, "run")
-    def test_new_invalid_archive_is_not_published(
+    def test_invalid_new_archive_does_not_trigger_workspace_cleanup(
         self, run: mock.Mock, validate: mock.Mock
     ) -> None:
         run.side_effect = self.fake_packager
         validate.side_effect = RuntimeError("CRC failed")
         with self.assertRaisesRegex(RuntimeError, "CRC failed"):
             self.package()
-        self.assertEqual(list(self.output.iterdir()), [])
+        self.assertTrue((self.output / self.build.package_name).is_file())
+        self.assertEqual((self.workspace / "build.tmp").read_bytes(), b"working data")
         self.assertEqual(self.cached_file.read_bytes(), b"old download")
 
     @mock.patch.object(packager.subprocess, "run")
@@ -244,70 +242,94 @@ class PackagingTests(unittest.TestCase):
         self.fetch.assert_not_called()
         run.assert_not_called()
 
+    @mock.patch.object(packager, "validate_archive")
     @mock.patch.object(packager.subprocess, "run")
-    def test_workspace_with_spaces_is_rejected_before_child(self, run: mock.Mock) -> None:
+    def test_output_with_spaces_still_uses_original_workspace(
+        self, run: mock.Mock, validate: mock.Mock
+    ) -> None:
         self.output = self.root / "output with spaces"
-        with self.assertRaisesRegex(ValueError, "without whitespace"):
-            self.package()
-        run.assert_not_called()
-        self.assertEqual(list(self.output.iterdir()), [])
+        run.side_effect = self.fake_packager
+        self.assertTrue(self.package().is_file())
+        run.assert_called_once()
+        validate.assert_called_once()
+        self.assertEqual(list(self.workspace.iterdir()), [])
 
+    @mock.patch.object(packager, "validate_archive")
     @mock.patch.object(packager.subprocess, "run")
-    def test_workspace_with_dots_is_rejected_before_child(self, run: mock.Mock) -> None:
+    def test_output_with_dots_still_uses_original_workspace(
+        self, run: mock.Mock, validate: mock.Mock
+    ) -> None:
         self.output = self.root / "output.with.dots"
         self.output.mkdir()
         old_archive = self.output / "0040.D77.7z"
         old_archive.write_bytes(b"previous BIOS")
-        with self.assertRaisesRegex(ValueError, "without whitespace or periods"):
+        run.side_effect = self.fake_packager
+        self.assertTrue(self.package().is_file())
+        run.assert_called_once()
+        validate.assert_called_once()
+        self.assertFalse(old_archive.exists())
+        self.assertEqual(list(self.workspace.iterdir()), [])
+
+    @mock.patch.object(packager.subprocess, "run")
+    def test_mismatched_original_workspace_is_not_rewritten(
+        self, run: mock.Mock
+    ) -> None:
+        changed_config = self.original_config.replace(
+            str(self.workspace), str(self.root / "unrelated")
+        )
+        self.config_file.write_text(changed_config, encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "must use work_space"):
             self.package()
         run.assert_not_called()
-        self.assertEqual(old_archive.read_bytes(), b"previous BIOS")
-        self.assertFalse(list(self.output.glob("packaging-*")))
+        self.fetch.assert_not_called()
+        self.assertEqual(self.config_file.read_text(), changed_config)
+        self.assertEqual(self.cached_file.read_bytes(), b"old download")
 
-    def test_cleanup_removes_loose_files_and_build_cache_but_not_archives(self) -> None:
-        (self.legacy_cache / "old.log").write_text("old log", encoding="utf-8")
+    def test_cleanup_empties_workspace_but_keeps_directory_and_archive(self) -> None:
+        (self.workspace / "old.log").write_text("old log", encoding="utf-8")
         self.output.mkdir()
         archive = self.output / self.build.package_name
         archive.write_bytes(b"verified archive")
-        packager.cleanup_legacy_cache(archive, self.source, self.logs)
-        self.assertFalse(self.legacy_cache.exists())
+        packager.clear_workspace(self.workspace)
+        self.assertTrue(self.workspace.is_dir())
+        self.assertEqual(list(self.workspace.iterdir()), [])
         self.assertEqual(archive.read_bytes(), b"verified archive")
-        self.assertEqual(self.marker.read_text(), "manual build")
+        self.assertEqual(self.config_file.read_text(), self.original_config)
 
     def test_cleanup_missing_cache_is_idempotent(self) -> None:
         self.cached_file.unlink()
         self.cached_build.rmdir()
-        self.legacy_cache.rmdir()
-        packager.cleanup_legacy_cache(
-            self.output / self.build.package_name, self.source, self.logs
-        )
-        self.assertFalse(self.legacy_cache.exists())
+        self.workspace.rmdir()
+        packager.clear_workspace(self.workspace)
+        self.assertFalse(self.workspace.exists())
 
-    def test_cleanup_refuses_cache_containing_protected_paths(self) -> None:
-        for protected in ("archive", "repackager", "logs"):
+    def test_preflight_refuses_overlapping_and_protected_paths(self) -> None:
+        for protected in ("output", "repackager", "logs"):
             with self.subTest(protected=protected):
-                archive = self.output / self.build.package_name
+                output = self.output
                 source = self.source
                 logs = self.logs
-                if protected == "archive":
-                    archive = self.legacy_cache / self.build.package_name
+                if protected == "output":
+                    output = self.workspace / "Bios"
                 elif protected == "repackager":
-                    source = self.legacy_cache / "source"
+                    source = self.workspace / "source"
                 else:
-                    logs = self.legacy_cache / "logs"
-                with self.assertRaisesRegex(ValueError, "protected BIOS cache"):
-                    packager.cleanup_legacy_cache(archive, source, logs)
+                    logs = self.workspace / "logs"
+                with self.assertRaisesRegex(ValueError, "protected|overlap"):
+                    packager.validate_packaging_paths(
+                        output, source, logs, self.config_file
+                    )
                 self.assertEqual(self.cached_file.read_bytes(), b"old download")
 
-    def test_cleanup_refuses_linked_cache(self) -> None:
+    def test_preflight_refuses_linked_workspace(self) -> None:
         metadata = mock.Mock(
             st_mode=stat.S_IFDIR,
             st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT,
         )
         with mock.patch.object(Path, "lstat", return_value=metadata):
-            with self.assertRaisesRegex(ValueError, "linked BIOS cache"):
-                packager.cleanup_legacy_cache(
-                    self.output / self.build.package_name, self.source, self.logs
+            with self.assertRaisesRegex(ValueError, "linked packaging directory"):
+                packager.validate_packaging_paths(
+                    self.output, self.source, self.logs, self.config_file
                 )
         self.assertEqual(self.cached_file.read_bytes(), b"old download")
 
@@ -316,12 +338,10 @@ class PackagingTests(unittest.TestCase):
             packager.shutil, "rmtree", side_effect=PermissionError("cache in use")
         ):
             with self.assertRaisesRegex(PermissionError, "cache in use"):
-                packager.cleanup_legacy_cache(
-                    self.output / self.build.package_name, self.source, self.logs
-                )
+                packager.clear_workspace(self.workspace)
         self.assertEqual(self.cached_file.read_bytes(), b"old download")
 
-    @mock.patch.object(packager, "cleanup_legacy_cache")
+    @mock.patch.object(packager, "clear_workspace", wraps=packager.clear_workspace)
     @mock.patch.object(packager, "validate_archive")
     @mock.patch.object(packager.subprocess, "run")
     def test_cleanup_failure_keeps_published_archive_for_retry(
@@ -335,12 +355,12 @@ class PackagingTests(unittest.TestCase):
             (self.output / self.build.package_name).read_bytes(), b"packaged BIOS"
         )
         self.assertEqual(self.cached_file.read_bytes(), b"old download")
-        self.assertFalse(list(self.output.glob("packaging-*")))
         cleanup.side_effect = None
         run.reset_mock()
         self.package()
-        run.assert_not_called()
+        run.assert_called_once()
         self.assertEqual(cleanup.call_count, 2)
+        self.assertEqual(list(self.workspace.iterdir()), [])
 
     @unittest.skipUnless(
         all(
@@ -439,57 +459,79 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(payload["bios"], "0040D79")
         self.assertEqual(payload["archive"], "0040.D79.7z")
         self.assertEqual(Path(payload["cwd"]), self.source)
-        self.assertNotEqual(Path(payload["workspace"]), self.original_workspace)
-        self.assertFalse(Path(payload["config"]).exists())
-        self.assertEqual(old_archive.read_bytes(), b"previous BIOS")
-        self.assertEqual(self.marker.read_text(), "manual build")
+        self.assertEqual(Path(payload["workspace"]), self.workspace)
+        self.assertEqual(Path(payload["config"]), self.config_file)
+        self.assertFalse(old_archive.exists())
         self.assertEqual(self.config_file.read_text(), self.original_config)
-        self.assertFalse(list(self.output.glob("packaging-*")))
-        self.assertFalse(self.legacy_cache.exists())
+        self.assertEqual(list(self.output.iterdir()), [destination])
+        self.assertTrue(self.workspace.is_dir())
+        self.assertEqual(list(self.workspace.iterdir()), [])
 
 
-class TemporaryCleanupTests(unittest.TestCase):
+class WorkspaceCleanupTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="bios-cleanup-")
+        self.addCleanup(self.temporary.cleanup)
+        self.workspace = Path(self.temporary.name) / "ATF"
+        self.build = self.workspace / "build"
+        self.build.mkdir(parents=True)
+        self.cached_file = self.build / "download.7z"
+        self.cached_file.write_bytes(b"download")
+
     @mock.patch.object(packager.time, "sleep")
     def test_transient_windows_sharing_violation_is_retried(
         self, sleep: mock.Mock
     ) -> None:
-        temporary = mock.Mock(spec=tempfile.TemporaryDirectory)
-        temporary.name = "temporary workspace"
         error = PermissionError("file is in use")
         error.winerror = 32
-        temporary.cleanup.side_effect = [error, None]
-        with self.assertLogs("bios_packager", level="WARNING") as logged:
-            packager.cleanup_temporary_workspace(temporary)
-        self.assertEqual(temporary.cleanup.call_count, 2)
+        original_rmtree = shutil.rmtree
+        attempts = 0
+
+        def remove_after_unlock(path: Path) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise error
+            original_rmtree(path)
+
+        with mock.patch.object(
+            packager.shutil, "rmtree", side_effect=remove_after_unlock
+        ) as remove:
+            with self.assertLogs("bios_packager", level="WARNING") as logged:
+                packager.clear_workspace(self.workspace)
+        self.assertEqual(remove.call_count, 2)
         sleep.assert_called_once_with(2)
         self.assertIn("retrying cleanup (1/5)", "\n".join(logged.output))
+        self.assertEqual(list(self.workspace.iterdir()), [])
 
     @mock.patch.object(packager.time, "sleep")
     def test_persistent_windows_lock_is_reported_after_bounded_retries(
         self, sleep: mock.Mock
     ) -> None:
-        temporary = mock.Mock(spec=tempfile.TemporaryDirectory)
-        temporary.name = "temporary workspace"
         error = PermissionError("file remains in use")
         error.winerror = 33
-        temporary.cleanup.side_effect = error
-        with self.assertLogs("bios_packager", level="WARNING"):
-            with self.assertRaisesRegex(PermissionError, "remains in use"):
-                packager.cleanup_temporary_workspace(temporary)
-        self.assertEqual(temporary.cleanup.call_count, 6)
+        with mock.patch.object(
+            packager.shutil, "rmtree", side_effect=error
+        ) as remove:
+            with self.assertLogs("bios_packager", level="WARNING"):
+                with self.assertRaisesRegex(PermissionError, "remains in use"):
+                    packager.clear_workspace(self.workspace)
+        self.assertEqual(remove.call_count, 6)
         self.assertEqual(sleep.call_count, 5)
+        self.assertTrue(self.cached_file.is_file())
 
     @mock.patch.object(packager.time, "sleep")
     def test_other_permission_errors_are_not_retried_or_hidden(
         self, sleep: mock.Mock
     ) -> None:
-        temporary = mock.Mock(spec=tempfile.TemporaryDirectory)
         error = PermissionError("access denied")
         error.winerror = 5
-        temporary.cleanup.side_effect = error
-        with self.assertRaisesRegex(PermissionError, "access denied"):
-            packager.cleanup_temporary_workspace(temporary)
-        temporary.cleanup.assert_called_once()
+        with mock.patch.object(
+            packager.shutil, "rmtree", side_effect=error
+        ) as remove:
+            with self.assertRaisesRegex(PermissionError, "access denied"):
+                packager.clear_workspace(self.workspace)
+        remove.assert_called_once()
         sleep.assert_not_called()
 
 

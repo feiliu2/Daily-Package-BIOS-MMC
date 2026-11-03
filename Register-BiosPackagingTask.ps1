@@ -47,7 +47,7 @@ $settings = New-ScheduledTaskSettingsSet `
     -ExecutionTimeLimit (New-TimeSpan -Hours 4)
 $task = New-ScheduledTask `
     -Action $action -Trigger $trigger -Principal $principal -Settings $settings `
-    -Description 'Package the newest OakStream daily BIOS; preserve existing archives.'
+    -Description 'Package the newest OakStream daily BIOS; keep only the latest archive and clear C:\ATF after verification.'
 
 [pscustomobject]@{
     TaskName = $TaskName
