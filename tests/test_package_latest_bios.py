@@ -134,6 +134,11 @@ class PackagingTests(unittest.TestCase):
         config.read(config_path, encoding="utf-8")
         workspace = Path(config["work_space"]["work_space"])
         staging = Path(options["file_path"])
+        downloaded_archive = workspace / self.build.bios_id / "download.7z"
+        legacy_extraction_path = Path(str(downloaded_archive).split(".")[0])
+        self.assertEqual(
+            legacy_extraction_path, downloaded_archive.with_suffix("")
+        )
         self.assertNotEqual(workspace, self.original_workspace)
         self.assertNotEqual(staging, self.output)
         self.assertEqual(workspace.parent, staging.parent)
@@ -165,7 +170,7 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(self.marker.read_text(), "manual build")
         self.assertEqual(self.config_file.read_text(), self.original_config)
         validate.assert_called_once()
-        self.assertFalse(list(self.output.glob(".packaging-*")))
+        self.assertFalse(list(self.output.glob("packaging-*")))
         self.assertFalse(self.legacy_cache.exists())
 
     @mock.patch.object(packager, "validate_archive")
@@ -247,6 +252,18 @@ class PackagingTests(unittest.TestCase):
         run.assert_not_called()
         self.assertEqual(list(self.output.iterdir()), [])
 
+    @mock.patch.object(packager.subprocess, "run")
+    def test_workspace_with_dots_is_rejected_before_child(self, run: mock.Mock) -> None:
+        self.output = self.root / "output.with.dots"
+        self.output.mkdir()
+        old_archive = self.output / "0040.D77.7z"
+        old_archive.write_bytes(b"previous BIOS")
+        with self.assertRaisesRegex(ValueError, "without whitespace or periods"):
+            self.package()
+        run.assert_not_called()
+        self.assertEqual(old_archive.read_bytes(), b"previous BIOS")
+        self.assertFalse(list(self.output.glob("packaging-*")))
+
     def test_cleanup_removes_loose_files_and_build_cache_but_not_archives(self) -> None:
         (self.legacy_cache / "old.log").write_text("old log", encoding="utf-8")
         self.output.mkdir()
@@ -318,7 +335,7 @@ class PackagingTests(unittest.TestCase):
             (self.output / self.build.package_name).read_bytes(), b"packaged BIOS"
         )
         self.assertEqual(self.cached_file.read_bytes(), b"old download")
-        self.assertFalse(list(self.output.glob(".packaging-*")))
+        self.assertFalse(list(self.output.glob("packaging-*")))
         cleanup.side_effect = None
         run.reset_mock()
         self.package()
@@ -375,9 +392,26 @@ class PackagingTests(unittest.TestCase):
                 encoding="utf-8",
             )
             tool = Path(__file__).parent / "7-Zip" / "7z.exe"
+            download = workspace / "download.7z"
+            subprocess.run(
+                [str(tool), "a", "-t7z", str(download), str(payload)],
+                check=True,
+                stdin=subprocess.DEVNULL,
+            )
+            # Match the existing unpacker's whole-path first-dot truncation.
+            unpacked = Path(str(download).split(".")[0])
+            if unpacked.is_dir():
+                shutil.rmtree(unpacked)
+            unpacked.mkdir()
+            subprocess.run(
+                [str(tool), "x", str(download), "-o" + str(unpacked)],
+                check=True,
+                stdin=subprocess.DEVNULL,
+            )
             subprocess.run(
                 [str(tool), "a", "-t7z",
-                 str(output / args.package_fdr_file), str(payload)],
+                 str(output / args.package_fdr_file),
+                 str(unpacked / "build.json")],
                 check=True,
                 stdin=subprocess.DEVNULL,
             )
@@ -410,7 +444,7 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(old_archive.read_bytes(), b"previous BIOS")
         self.assertEqual(self.marker.read_text(), "manual build")
         self.assertEqual(self.config_file.read_text(), self.original_config)
-        self.assertFalse(list(self.output.glob(".packaging-*")))
+        self.assertFalse(list(self.output.glob("packaging-*")))
         self.assertFalse(self.legacy_cache.exists())
 
 

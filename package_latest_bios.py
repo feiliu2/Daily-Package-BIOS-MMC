@@ -207,7 +207,7 @@ def package_latest(
     destination = output_dir / build.package_name
     LOGGER.info("Latest BIOS: %s; final archive: %s", build.bios_id, destination)
     if dry_run:
-        planned_job = output_dir / f".packaging-{build.bios_id}-DRYRUN"
+        planned_job = output_dir / f"packaging-{build.bios_id}-DRYRUN"
         LOGGER.info(
             "Dry run; command with illustrative temporary paths: %s",
             subprocess.list2cmdline(
@@ -232,14 +232,18 @@ def package_latest(
         f"{datetime.now():%Y%m%d-%H%M%S}-{os.getpid()}.log"
     )
     with tempfile.TemporaryDirectory(
-        prefix=f".packaging-{build.bios_id}-", dir=output_dir
+        prefix=f"packaging-{build.bios_id}-", dir=output_dir
     ) as temporary:
         job_dir = Path(temporary)
         workspace = job_dir / "work"
-        if any(character.isspace() for character in str(workspace)):
+        # Legacy extraction truncates the whole download path at its first dot.
+        if "." in str(workspace) or any(
+            character.isspace() for character in str(workspace)
+        ):
             raise ValueError(
-                "The existing repackager does not quote its compression "
-                "workspace. Use an --output-dir without whitespace."
+                "The existing repackager requires a workspace path without "
+                "whitespace or periods. Use an --output-dir without "
+                "whitespace or periods."
             )
         staging_output = job_dir / "output"
         staging_output.mkdir()

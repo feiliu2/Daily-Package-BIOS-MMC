@@ -92,8 +92,12 @@ The wrapper limits packaging to three hours and archive validation to
   the bundled `7-Zip\7z.exe t` validates its complete contents.
 - An existing same-name archive is validated and skipped. A damaged
   existing archive produces an error; it is not silently overwritten.
-- Output paths containing whitespace are rejected because the existing
-  repackager does not quote its compression workspace.
+- The entire output path must contain no whitespace or periods. The existing
+  repackager leaves its compression workspace unquoted and truncates extraction
+  paths at the first period in the entire download path. Temporary job names
+  therefore use the dot-free `packaging-<BIOS ID>-...` prefix. Unsafe paths are
+  rejected before launching the repackager to prevent deletion of a parent
+  directory and previously saved archives.
 - Failed or unfinished jobs do not publish partial archives. Their
   isolated temporary directory is removed; diagnostic logs are retained.
 - HTTP errors, login pages without build directories, missing tools and
