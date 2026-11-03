@@ -448,6 +448,51 @@ class PackagingTests(unittest.TestCase):
         self.assertFalse(self.legacy_cache.exists())
 
 
+class TemporaryCleanupTests(unittest.TestCase):
+    @mock.patch.object(packager.time, "sleep")
+    def test_transient_windows_sharing_violation_is_retried(
+        self, sleep: mock.Mock
+    ) -> None:
+        temporary = mock.Mock(spec=tempfile.TemporaryDirectory)
+        temporary.name = "temporary workspace"
+        error = PermissionError("file is in use")
+        error.winerror = 32
+        temporary.cleanup.side_effect = [error, None]
+        with self.assertLogs("bios_packager", level="WARNING") as logged:
+            packager.cleanup_temporary_workspace(temporary)
+        self.assertEqual(temporary.cleanup.call_count, 2)
+        sleep.assert_called_once_with(2)
+        self.assertIn("retrying cleanup (1/5)", "\n".join(logged.output))
+
+    @mock.patch.object(packager.time, "sleep")
+    def test_persistent_windows_lock_is_reported_after_bounded_retries(
+        self, sleep: mock.Mock
+    ) -> None:
+        temporary = mock.Mock(spec=tempfile.TemporaryDirectory)
+        temporary.name = "temporary workspace"
+        error = PermissionError("file remains in use")
+        error.winerror = 33
+        temporary.cleanup.side_effect = error
+        with self.assertLogs("bios_packager", level="WARNING"):
+            with self.assertRaisesRegex(PermissionError, "remains in use"):
+                packager.cleanup_temporary_workspace(temporary)
+        self.assertEqual(temporary.cleanup.call_count, 6)
+        self.assertEqual(sleep.call_count, 5)
+
+    @mock.patch.object(packager.time, "sleep")
+    def test_other_permission_errors_are_not_retried_or_hidden(
+        self, sleep: mock.Mock
+    ) -> None:
+        temporary = mock.Mock(spec=tempfile.TemporaryDirectory)
+        error = PermissionError("access denied")
+        error.winerror = 5
+        temporary.cleanup.side_effect = error
+        with self.assertRaisesRegex(PermissionError, "access denied"):
+            packager.cleanup_temporary_workspace(temporary)
+        temporary.cleanup.assert_called_once()
+        sleep.assert_not_called()
+
+
 class ValidationAndExitTests(unittest.TestCase):
     @mock.patch.object(packager.subprocess, "run")
     def test_archive_test_checks_all_data_and_reports_crc_errors(

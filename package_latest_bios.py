@@ -10,6 +10,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -174,6 +175,23 @@ def cleanup_legacy_cache(
     LOGGER.info("Legacy BIOS cache removed: %s", cache)
 
 
+def cleanup_temporary_workspace(
+    temporary: tempfile.TemporaryDirectory[str],
+) -> None:
+    for attempt in range(6):
+        try:
+            temporary.cleanup()
+            return
+        except PermissionError as error:
+            if getattr(error, "winerror", None) not in (32, 33) or attempt == 5:
+                raise
+            LOGGER.warning(
+                "Temporary workspace is in use; retrying cleanup (%s/5): %s",
+                attempt + 1, temporary.name,
+            )
+            time.sleep(2)
+
+
 def package_latest(
     *,
     artifactory_url: str,
@@ -231,10 +249,11 @@ def package_latest(
         f"restructure-{build.bios_id}-"
         f"{datetime.now():%Y%m%d-%H%M%S}-{os.getpid()}.log"
     )
-    with tempfile.TemporaryDirectory(
+    temporary = tempfile.TemporaryDirectory(
         prefix=f"packaging-{build.bios_id}-", dir=output_dir
-    ) as temporary:
-        job_dir = Path(temporary)
+    )
+    try:
+        job_dir = Path(temporary.name)
         workspace = job_dir / "work"
         # Legacy extraction truncates the whole download path at its first dot.
         if "." in str(workspace) or any(
@@ -276,6 +295,8 @@ def package_latest(
         if destination.exists():
             raise FileExistsError(f"Refusing to overwrite: {destination}")
         staged_archive.rename(destination)
+    finally:
+        cleanup_temporary_workspace(temporary)
     cleanup_legacy_cache(destination, repackaging_dir, log_dir)
     LOGGER.info("BIOS packaging completed: %s", destination)
     return destination

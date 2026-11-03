@@ -100,6 +100,9 @@ The wrapper limits packaging to three hours and archive validation to
   directory and previously saved archives.
 - Failed or unfinished jobs do not publish partial archives. Their
   isolated temporary directory is removed; diagnostic logs are retained.
+- Temporary cleanup retries Windows sharing/lock violations up to five times
+  at two-second intervals. Other cleanup errors, or locks that persist after
+  those retries, are reported as failures rather than silently ignored.
 - HTTP errors, login pages without build directories, missing tools and
   packaging/validation failures are logged and return exit code 1. The
   script does not silently select an older build when the newest fails.
