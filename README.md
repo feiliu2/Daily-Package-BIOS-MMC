@@ -1,9 +1,11 @@
-# Daily OakStream BIOS packaging
+# Daily OakStream BIOS and matching MMC packaging
 
 The wrapper finds the newest `OAKSTRM.0.RPB.<release>.D.<revision>/`
 directory in the Artifactory index and invokes the existing
 `restructure_new.py`. Release and revision are compared **numerically**,
 not by HTML link order, lexical order or directory modification time.
+After BIOS packaging, it reads that archive's MMC firmware version and
+downloads/packages the exact matching MMC build, not the newest unrelated version.
 
 For example, `OAKSTRM.0.RPB.0040.D.79/` becomes:
 
@@ -14,11 +16,13 @@ For example, `OAKSTRM.0.RPB.0040.D.79/` becomes:
 ## Defaults
 
 - Artifactory: the `Daily/OakStreamRp/main/` index supplied for this project.
+- MMC Artifactory: `Daily/ZCodeFW/zcode_dmr_ap_dev/`, using the BIOS-derived
+  `MMC_FW.DMR_AP.<version>/DMR_ZCODE_DebugSigned_linux/` directory.
 - Existing repackager:
   `C:\OKS\OakStreamAPIfwi\Ifwi\oak_release\BuildScripts\CommonLib\BIOS_Repackaging`
 - Original configuration: `Config\config_oak_ap.ini` in that directory.
 - Final archives: `C:\LocalPath\Bios`.
-- Original workspace: `C:\ATF`, emptied after the final archive is verified.
+- Original workspace: `C:\ATF`, emptied after the BIOS archive is verified.
 - Logs: `logs` beside [package_latest_bios.py](package_latest_bios.py).
 - Daily schedule: **15:00, local computer time**.
 
@@ -37,9 +41,22 @@ python .\package_latest_bios.py
 
 The preview queries the real index and prints the selected BIOS ID and
 planned command. It does not run the repackager or create output archives.
+MMC selection is deferred until the new BIOS exists; the preview never guesses
+its version from an older archive.
 Use `--help` for URL, directory, configuration and log overrides.
 The `DEFAULT_*` constants in the Python script control the defaults used
 by the scheduled task as well as manual runs.
+
+To package only MMC from an existing BIOS without rebuilding or deleting BIOS:
+
+```powershell
+python .\package_latest_bios.py --bios-archive C:\LocalPath\Bios\0040.D79.7z --dry-run
+python .\package_latest_bios.py --bios-archive C:\LocalPath\Bios\0040.D79.7z
+```
+
+In this mode, the preview reads the existing BIOS and queries its matching MMC
+directory, but downloads/extracts nothing and leaves existing archives unchanged.
+Use `--mmc-artifactory-url` to override the MMC base URL.
 
 ## Register the daily task
 
@@ -65,7 +82,7 @@ must remain logged on. The computer must be on and connected to the Intel
 network or VPN. Missed runs start when available; failures retry up to
 three times at 15-minute intervals. Overlapping scheduled runs are ignored.
 Battery operation is allowed, and switching to battery does not stop a run.
-The wrapper limits packaging to three hours and archive validation to
+The wrapper limits the BIOS child to three hours and each 7-Zip step to
 30 minutes; the task has a four-hour overall limit.
 
 ## Execution flow
@@ -83,12 +100,44 @@ The wrapper limits packaging to three hours and archive validation to
 4. After the command exits successfully, validate the archive with the bundled
    `7-Zip\7z.exe t`.
 5. Only after validation succeeds, delete the contents of `C:\ATF`, leaving the
-   directory itself empty. The output directory retains only the latest archive.
+   directory itself empty.
+6. Read all `DEFINE MMC1`/`DEFINE MMC2` references in the BIOS archive's
+   `Trunk_*\dsc\FvRawDefPath.dsc` files. Require one consistent `mmc_pkg_<version>_`
+   version across all references. This is the build/stitching configuration's
+   version, not an independently decoded ROM-internal version field.
+7. Query the exact MMC version's `DMR_ZCODE_DebugSigned_linux/` directory and
+   download its single `_BuildPkg.7z`. Multiple or missing build packages fail
+   explicitly. Loose `.bin` files in the download index are not mixed into
+   `binaries`.
+8. Extract only the source archive's `binaries` subtree, including its license
+   files. Other source/build directories are never extracted. Use direct 7-Zip
+   calls with explicit destinations, not the original BIOS unpacking helper.
+9. Produce `MMCFW_<version>.7z` with exactly this structure:
+
+   ```text
+   MMCFW_0.1022.0\
+     binaries\
+       LICENSE-3RD-PARTY.txt
+       LICENSE-Intel-Agreement.txt
+       mmc_pkg_0.1022.0_...bin
+       ...
+   ```
+
+10. Fully test the MMC archive and require its file paths, sizes and CRCs to
+    match the downloaded source's `binaries` subtree before publishing it.
+    Remove the uniquely owned MMC staging directory; no downloaded/extracted
+    MMC files remain. Staging is on the output volume so replacement is atomic.
+
+The final output contains the latest BIOS archive and its corresponding
+`MMCFW_<version>.7z`. For example, the current `0040.D79.7z` references
+MMC `0.1022.0`, producing `MMCFW_0.1022.0.7z`; it does not select `0.1024.0`
+merely because that version also exists.
 
 The original command is executed on every run, even if the latest BIOS ID has
 not changed. **The original repackager clears the output directory before writing
-the new archive: older archives and any other files there are not preserved.**
-This latest-only behavior is intentional.
+the new archive: older BIOS/MMC archives and any other files there are not
+preserved.** This latest-pair-only behavior is intentional. The standalone
+`--bios-archive` mode does not run this destructive BIOS step.
 
 ## Safety and errors
 
@@ -102,21 +151,30 @@ This latest-only behavior is intentional.
 - The workspace path must contain no whitespace or periods because of the
   original repackager's extraction and compression path handling. The normal
   `C:\ATF` path satisfies this requirement.
-- Dry runs do not execute the command or delete anything. If packaging or archive
-  validation fails, no final workspace cleanup is performed; whatever the original
+- Dry runs do not execute the BIOS command or delete anything. If BIOS packaging or
+  BIOS archive validation fails, no final workspace cleanup is performed; whatever the original
   script left in the workspace is retained for investigation. The original script
   may already have replaced workspace/output contents before a failure.
+- MMC failures return a nonzero exit code without deleting or modifying the BIOS.
+  Existing same-version MMC output is replaced only after the new archive passes
+  verification. Owned MMC staging files are cleaned on both success and failure;
+  unrelated files and other jobs' staging directories are not swept.
+- Unsafe archive paths, links inside `binaries`, missing/inconsistent MMC
+  references, and a source binary version different from the BIOS are rejected.
 - Workspace cleanup retries Windows sharing/lock violations up to five times at
   two-second intervals. Persistent locks and other errors are reported as failures.
 - HTTP errors, login pages without build directories, missing tools and
   packaging/validation/cleanup failures are logged and return exit code 1.
   The wrapper does not silently select an older build or trust an unverified archive.
 - Each run has a separate `restructure-*.log`. The daily `package-bios-*.log`
-  contains selection, command and result information. Logs are retained outside
+  contains BIOS/MMC selection, command and result information. Logs are retained outside
   the workspace and BIOS output directory.
 
 ## Tests
 
 ```powershell
-python -m unittest discover -s tests -p test_package_latest_bios.py -v
+python -m unittest discover -s tests -p "test_package*.py" -v
 ```
+
+The integration tests use the existing bundled 7-Zip and generated test data;
+they do not download firmware or execute the real BIOS repackager.

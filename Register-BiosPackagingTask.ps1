@@ -47,7 +47,7 @@ $settings = New-ScheduledTaskSettingsSet `
     -ExecutionTimeLimit (New-TimeSpan -Hours 4)
 $task = New-ScheduledTask `
     -Action $action -Trigger $trigger -Principal $principal -Settings $settings `
-    -Description 'Package the newest OakStream daily BIOS; keep only the latest archive and clear C:\ATF after verification.'
+    -Description 'Package the newest OakStream BIOS and its matching MMC firmware; retain only the latest archive pair and clear C:\ATF after BIOS verification.'
 
 [pscustomobject]@{
     TaskName = $TaskName
@@ -59,6 +59,6 @@ $task = New-ScheduledTask `
     Arguments = $action.Arguments
 }
 
-if ($PSCmdlet.ShouldProcess($TaskName, "Register daily BIOS packaging at $At")) {
+if ($PSCmdlet.ShouldProcess($TaskName, "Register daily BIOS and MMC packaging at $At")) {
     Register-ScheduledTask -TaskName $TaskName -InputObject $task -ErrorAction Stop
 }
