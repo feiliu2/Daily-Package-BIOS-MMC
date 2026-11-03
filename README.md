@@ -17,6 +17,33 @@ For example, `OAKSTRM.0.RPB.0040.D.79/` becomes:
 --bios=0040D79 --package_fdr_file=0040.D79.7z
 ```
 
+## Prerequisites
+
+This repository is **not a standalone BIOS repackager**. It requires the local
+`OakStreamAPIfwi` source workspace at **`C:\OKS\OakStreamAPIfwi`**.
+The automation does not clone or initialize that workspace during daily runs.
+
+Install/configure `edkrepo` with access to the `OakStreamAPIfwi` project and its
+source repositories, then download the code **from the parent directory
+`C:\OKS`**:
+
+```powershell
+New-Item -ItemType Directory -Force -Path 'C:\OKS' | Out-Null
+Set-Location 'C:\OKS'
+edkrepo clone OakStreamAPIfwi OakStreamAPIfwi
+```
+
+This creates `C:\OKS\OakStreamAPIfwi`. If that workspace already exists, reuse it
+and skip cloning; do not overwrite or delete the existing source workspace.
+
+The workspace must contain the original repackager at
+`Ifwi\oak_release\BuildScripts\CommonLib\BIOS_Repackaging`, including
+`restructure_new.py`, `Config\config_oak_ap.ini`, and the bundled `7-Zip` tools.
+
+Use Python 3.10 or later with the existing repackager's dependencies
+installed. The wrapper itself uses only the standard library. The scheduled
+task pins the full Python executable path at registration.
+
 ## Defaults
 
 - Artifactory: the `Daily/OakStreamRp/main/` index supplied for this project.
@@ -29,10 +56,6 @@ For example, `OAKSTRM.0.RPB.0040.D.79/` becomes:
 - Original workspace: `C:\ATF`, emptied after the BIOS archive is verified.
 - Logs: `logs` beside [package_latest_bios.py](package_latest_bios.py).
 - Daily schedule: **15:00, local computer time**.
-
-Use Python 3.10 or later with the existing repackager's dependencies
-installed. The wrapper itself uses only the standard library. The scheduled
-task pins the full Python executable path at registration.
 
 ## Preview and run
 
