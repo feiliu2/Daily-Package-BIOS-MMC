@@ -19,8 +19,9 @@ For example, `OAKSTRM.0.RPB.0040.D.79/` becomes:
 
 ## Prerequisites
 
-This repository is **not a standalone BIOS repackager**. It requires the local
-`OakStreamAPIfwi` source workspace at **`C:\OKS\OakStreamAPIfwi`**.
+This repository is **not a standalone BIOS repackager**. It requires a local
+`OakStreamAPIfwi` source workspace. **`C:\OKS\OakStreamAPIfwi` below is an example,
+not a hardcoded source location.**
 The automation does not clone or initialize that workspace during daily runs.
 
 Install/configure `edkrepo` with access to the `OakStreamAPIfwi` project and its
@@ -40,6 +41,13 @@ The workspace must contain the original repackager at
 `Ifwi\oak_release\BuildScripts\CommonLib\BIOS_Repackaging`, including
 `restructure_new.py`, `Config\config_oak_ap.ini`, and the bundled `7-Zip` tools.
 
+Deploy [package_latest_bios.py](package_latest_bios.py) and
+[Register-BiosPackagingTask.ps1](Register-BiosPackagingTask.ps1) into that
+`BIOS_Repackaging` directory, beside `restructure_new.py`. If the automation
+files are already included in the source branch you cloned, no copying is needed.
+**The default tool directory is the automation script's own directory**, not the
+current working directory. There is no fallback to another source workspace.
+
 Use Python 3.10 or later with the existing repackager's dependencies
 installed. The wrapper itself uses only the standard library. The scheduled
 task pins the full Python executable path at registration.
@@ -49,8 +57,9 @@ task pins the full Python executable path at registration.
 - Artifactory: the `Daily/OakStreamRp/main/` index supplied for this project.
 - MMC Artifactory: `Daily/ZCodeFW/zcode_dmr_ap_dev/`, using the BIOS-derived
   `MMC_FW.DMR_AP.<version>/DMR_ZCODE_DebugSigned_linux/` directory.
-- Existing repackager:
-  `C:\OKS\OakStreamAPIfwi\Ifwi\oak_release\BuildScripts\CommonLib\BIOS_Repackaging`
+- Existing repackager: the directory containing `package_latest_bios.py`,
+  normally `BIOS_Repackaging` alongside `restructure_new.py`.
+  Override with `--repackaging-dir` when keeping the automation elsewhere.
 - Original configuration: `Config\config_oak_ap.ini` in that directory.
 - Final archives: `C:\LocalPath\Bios`.
 - Original workspace: `C:\ATF`, emptied after the BIOS archive is verified.
@@ -59,7 +68,7 @@ task pins the full Python executable path at registration.
 
 ## Preview and run
 
-From this directory:
+From the deployed `BIOS_Repackaging` directory containing both Python scripts:
 
 ```powershell
 python .\package_latest_bios.py --dry-run
@@ -74,6 +83,16 @@ Use `--help` for URL, directory, configuration and log overrides.
 The `DEFAULT_*` constants in the Python script control the defaults used
 by the scheduled task as well as manual runs.
 
+If running from a separate automation checkout, explicitly point to the existing
+tools, for example:
+
+```powershell
+python .\package_latest_bios.py --repackaging-dir "C:\OKS\OakStreamAPIfwi\Ifwi\oak_release\BuildScripts\CommonLib\BIOS_Repackaging" --dry-run
+```
+
+Remove `--dry-run` to package. This override also applies to the MMC-only mode
+below; it changes only that invocation and is not saved in the scheduled task.
+
 To package only MMC from an existing BIOS without rebuilding or deleting BIOS:
 
 ```powershell
@@ -86,6 +105,11 @@ directory, but downloads/extracts nothing and leaves existing archives unchanged
 Use `--mmc-artifactory-url` to override the MMC base URL.
 
 ## Register the daily task
+
+Run registration from the same deployed directory as the two Python scripts.
+The task starts the adjacent automation script, which locates the original tools
+relative to itself. If you move the automation after registration, update the
+existing task's action to its new location.
 
 Preview the registration without creating a task:
 
@@ -203,5 +227,9 @@ preserved.** This latest-pair-only behavior is intentional. The standalone
 python -m unittest discover -s tests -p "test_package*.py" -v
 ```
 
-The integration tests use the existing bundled 7-Zip and generated test data;
-they do not download firmware or execute the real BIOS repackager.
+The integration tests use generated test data and an existing native 7-Zip:
+the adjacent bundle, one on `PATH`, or a standard Windows/Scoop installation.
+They copy the tools into owned test fixtures and do not depend on a fixed
+OakStream workspace location. If no suitable 7-Zip is installed, native integration
+tests explicitly report that they are skipped. They do not download firmware or
+execute the real BIOS repackager.

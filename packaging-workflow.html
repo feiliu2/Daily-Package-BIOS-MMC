@@ -328,7 +328,7 @@ Archive: 0040.D79.7z</code></pre>
               </li>
               <li class="step">
                 <div class="step-heading"><span class="step-number" aria-hidden="true">03</span><h3>原位置执行原命令</h3></div>
-                <p>工作目录：</p>
+                <p>工作目录自动取自 <code>package_latest_bios.py</code> 所在文件夹，应与原打包脚本同目录，不依赖启动时的当前目录。以下路径仅为示例：</p>
                 <pre><code>C:\OKS\OakStreamAPIfwi\Ifwi\oak_release\BuildScripts\CommonLib\BIOS_Repackaging</code></pre>
                 <pre><code>python restructure_new.py --bios=0040D79 --package_fdr_file=0040.D79.7z --file_path=C:\LocalPath\Bios --config_ini=config_oak_ap.ini</code></pre>
                 <ul>
@@ -413,16 +413,22 @@ Archive: 0040.D79.7z</code></pre>
       <section id="commands" aria-labelledby="commands-title">
         <div class="section-heading">
           <h2 id="commands-title">运行与调度命令</h2>
-          <p>在项目目录中执行；页面按钮仅用于打印，不会运行这些命令</p>
+          <p>在部署后的 BIOS_Repackaging 目录执行；页面按钮仅用于打印</p>
         </div>
         <div class="command-grid">
           <article class="command-card wide">
             <h3>前置依赖：准备本地 OakStreamAPIfwi 源码</h3>
-            <p>本仓库不是独立的 BIOS 打包工具。需先安装并配置可访问该项目及源码仓库的 <code>edkrepo</code>，在父目录 <code>C:\OKS</code> 执行以下一次性下载步骤：</p>
+            <p>本仓库不是独立的 BIOS 打包工具。需先安装并配置可访问该项目及源码仓库的 <code>edkrepo</code>，选择父目录后一次性下载源码；以下 <code>C:\OKS</code> 仅为示例，并非固定源码路径：</p>
             <pre><code>New-Item -ItemType Directory -Force -Path 'C:\OKS' | Out-Null
 Set-Location 'C:\OKS'
 edkrepo clone OakStreamAPIfwi OakStreamAPIfwi</code></pre>
-            <p>命令会创建 <code>C:\OKS\OakStreamAPIfwi</code>。已有该源码工作区时直接复用，跳过 clone，不覆盖或删除现有源码。每日任务不会自动 clone；它使用该工作区内现有的原始打包脚本、配置和 7-Zip 工具。</p>
+            <p>命令会创建 <code>C:\OKS\OakStreamAPIfwi</code>。已有该源码工作区时直接复用，跳过 clone，不覆盖或删除现有源码。每日任务不会自动 clone。</p>
+            <p>将 <code>package_latest_bios.py</code> 与 <code>Register-BiosPackagingTask.ps1</code> 部署到原 <code>BIOS_Repackaging</code> 目录，与 <code>restructure_new.py</code>、<code>Config</code> 和 <code>7-Zip</code> 放在一起；若源码分支已包含这两个文件，无需再复制。默认按自动化脚本所在目录定位原工具。</p>
+            <details>
+              <summary>自动化脚本与原工具不同目录时</summary>
+              <pre><code>python .\package_latest_bios.py --repackaging-dir "C:\OKS\OakStreamAPIfwi\Ifwi\oak_release\BuildScripts\CommonLib\BIOS_Repackaging" --dry-run</code></pre>
+              <p>将路径换成实际原工具目录；去掉 <code>--dry-run</code> 后实际打包。该覆盖也适用于只打包 MMC，但仅影响当次运行，不会自动保存到计划任务。默认不搜索或回退到其他源码工作区。</p>
+            </details>
           </article>
           <article class="command-card">
             <h3>完整流程：BIOS + 匹配 MMC</h3>
@@ -442,6 +448,7 @@ edkrepo clone OakStreamAPIfwi OakStreamAPIfwi</code></pre>
           </article>
           <article class="command-card wide">
             <h3>注册 Windows 每日计划任务</h3>
+            <p>从上述同目录部署位置注册。任务调用相邻的自动化脚本，原工具目录由该脚本自动定位；注册后再移动脚本时，需要更新原任务的启动路径。</p>
             <div class="schedule-options">
               <div><span class="command-label">先预览注册配置</span><pre><code>.\Register-BiosPackagingTask.ps1 -WhatIf</code></pre></div>
               <div><span class="command-label">确认后注册，默认 15:00</span><pre><code>.\Register-BiosPackagingTask.ps1</code></pre></div>
@@ -478,7 +485,7 @@ edkrepo clone OakStreamAPIfwi OakStreamAPIfwi</code></pre>
             <p>Windows 文件共享 / 锁定错误 32、33 最多重试 5 次，间隔 2 秒。持续锁定、其他权限问题或清理失败会明确报错，不跳过检查后宣告任务完成。</p>
           </article>
         </div>
-        <div class="logs"><strong>排查日志：</strong><code>logs\package-bios-YYYYMMDD.log</code> 记录 BIOS / MMC 的选择、执行与结果；<code>logs\restructure-*.log</code> 保存原 BIOS 子进程输出。日志位于项目目录，不随 C:\ATF 或固件输出清理。</div>
+        <div class="logs"><strong>排查日志：</strong><code>logs\package-bios-YYYYMMDD.log</code> 记录 BIOS / MMC 的选择、执行与结果；<code>logs\restructure-*.log</code> 保存原 BIOS 子进程输出。日志位于自动化脚本旁边的 logs 目录，不随 C:\ATF 或固件输出清理。</div>
       </section>
     </main>
 

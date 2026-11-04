@@ -9,6 +9,7 @@ from unittest import mock
 from urllib.error import URLError
 
 import package_latest_bios as packager
+from seven_zip_support import SEVEN_ZIP_DIRECTORY, copy_seven_zip
 
 
 VERSION = "0.1022.0"
@@ -159,8 +160,8 @@ class MmcSourceTests(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    (packager.DEFAULT_REPACKAGING_DIR / "7-Zip" / "7z.exe").is_file(),
-    "Integration tests require the existing repackager's bundled 7-Zip.",
+    SEVEN_ZIP_DIRECTORY is not None,
+    "Integration tests require a bundled or installed native 7-Zip.",
 )
 class MmcPackagingTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -169,7 +170,8 @@ class MmcPackagingTests(unittest.TestCase):
         self.root = Path(temporary.name)
         self.output = self.root / "output with spaces.and.dots"
         self.output.mkdir()
-        self.seven_zip = packager.DEFAULT_REPACKAGING_DIR / "7-Zip" / "7z.exe"
+        self.repackaging_dir = self.root / "repackager"
+        self.seven_zip = copy_seven_zip(self.repackaging_dir / "7-Zip")
         bios_root = self.root / "bios fixtures"
         dsc = bios_root / "Trunk_AP00" / "dsc" / "FvRawDefPath.dsc"
         dsc.parent.mkdir(parents=True)
@@ -228,7 +230,7 @@ class MmcPackagingTests(unittest.TestCase):
         return packager.package_mmc_fw(
             self.bios,
             artifactory_url=BASE_URL,
-            repackaging_dir=packager.DEFAULT_REPACKAGING_DIR,
+            repackaging_dir=self.repackaging_dir,
             output_dir=self.output,
             dry_run=dry_run,
         )
@@ -355,6 +357,10 @@ class MmcOrchestrationTests(unittest.TestCase):
         self.mmc.side_effect = lambda *args, **kwargs: self.bios.assert_called_once()
         self.assertEqual(packager.main([]), 0)
         self.bios.assert_called_once()
+        self.assertEqual(
+            self.bios.call_args.kwargs["repackaging_dir"],
+            Path(packager.__file__).resolve().parent,
+        )
         self.mmc.assert_called_once_with(
             Path("0040.D79.7z"),
             artifactory_url=packager.DEFAULT_MMC_ARTIFACTORY_URL,
@@ -362,6 +368,23 @@ class MmcOrchestrationTests(unittest.TestCase):
             output_dir=packager.DEFAULT_OUTPUT_DIR,
             dry_run=False,
         )
+
+    def test_explicit_repackaging_directory_overrides_both_modes(self) -> None:
+        directory = Path(r"D:\other workspace\BIOS_Repackaging")
+        for mode in ([], ["--bios-archive", "existing.7z"]):
+            with self.subTest(mode=mode):
+                self.bios.reset_mock()
+                self.mmc.reset_mock()
+                self.assertEqual(
+                    packager.main([*mode, "--repackaging-dir", str(directory)]), 0
+                )
+                if mode:
+                    self.bios.assert_not_called()
+                else:
+                    self.assertEqual(
+                        self.bios.call_args.kwargs["repackaging_dir"], directory
+                    )
+                self.assertEqual(self.mmc.call_args.kwargs["repackaging_dir"], directory)
 
     def test_existing_bios_mode_bypasses_bios_packaging(self) -> None:
         self.assertEqual(packager.main(["--bios-archive", "existing.7z"]), 0)

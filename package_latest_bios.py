@@ -28,10 +28,7 @@ DEFAULT_MMC_ARTIFACTORY_URL = (
     "https://af01p-or.devtools.intel.com/artifactory/"
     "server-bios-staging-local/Daily/ZCodeFW/zcode_dmr_ap_dev/"
 )
-DEFAULT_REPACKAGING_DIR = Path(
-    r"C:\OKS\OakStreamAPIfwi\Ifwi\oak_release"
-    r"\BuildScripts\CommonLib\BIOS_Repackaging"
-)
+DEFAULT_REPACKAGING_DIR = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_DIR = Path(r"C:\LocalPath\Bios")
 WORKSPACE_DIR = Path(r"C:\ATF")
 DEFAULT_CONFIG_INI = "config_oak_ap.ini"
@@ -543,7 +540,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Package only matching MMC firmware from an existing BIOS archive.",
     )
     parser.add_argument(
-        "--repackaging-dir", type=Path, default=DEFAULT_REPACKAGING_DIR
+        "--repackaging-dir", type=Path, default=DEFAULT_REPACKAGING_DIR,
+        help="Original repackager directory (default: this script's directory).",
     )
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--config-ini", default=DEFAULT_CONFIG_INI)

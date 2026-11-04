@@ -5,6 +5,7 @@ import json
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -13,10 +14,39 @@ from unittest import mock
 from urllib.error import URLError
 
 import package_latest_bios as packager
+from seven_zip_support import SEVEN_ZIP_DIRECTORY, copy_seven_zip
 
 
 def index_page(*names: str) -> str:
     return "\n".join(f'<a href="{name}">{name}</a>' for name in names)
+
+
+class DeploymentPathTests(unittest.TestCase):
+    def test_relocated_script_uses_its_directory_not_the_callers_directory(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="bios-deployment-") as temporary:
+            root = Path(temporary)
+            deployed = root / "deployed tools"
+            deployed.mkdir()
+            source = Path(packager.__file__).resolve()
+            shutil.copyfile(source, deployed / source.name)
+            caller = root / "unrelated working directory"
+            caller.mkdir()
+            probe = (
+                "import sys; sys.path.insert(0, sys.argv[1]); "
+                "import package_latest_bios; "
+                "print(package_latest_bios.DEFAULT_REPACKAGING_DIR)"
+            )
+            result = subprocess.run(
+                [sys.executable, "-c", probe, str(deployed)],
+                cwd=caller,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=30,
+                check=True,
+            )
+            self.assertEqual(result.stdout.strip(), str(deployed.resolve()))
 
 
 class BuildSelectionTests(unittest.TestCase):
@@ -363,18 +393,11 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(list(self.workspace.iterdir()), [])
 
     @unittest.skipUnless(
-        all(
-            (packager.DEFAULT_REPACKAGING_DIR / "7-Zip" / name).is_file()
-            for name in ("7z.exe", "7z.dll")
-        ),
-        "Integration test requires the existing repackager's bundled 7-Zip.",
+        SEVEN_ZIP_DIRECTORY is not None,
+        "Integration test requires a bundled or installed native 7-Zip.",
     )
     def test_real_python_child_and_7zip_publish_a_verified_archive(self) -> None:
-        for name in ("7z.exe", "7z.dll"):
-            shutil.copyfile(
-                packager.DEFAULT_REPACKAGING_DIR / "7-Zip" / name,
-                self.source / "7-Zip" / name,
-            )
+        copy_seven_zip(self.source / "7-Zip")
         fake_legacy_script = textwrap.dedent(
             """\
             import argparse
