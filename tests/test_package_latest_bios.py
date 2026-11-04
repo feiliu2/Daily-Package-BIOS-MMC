@@ -140,7 +140,8 @@ class DeploymentPathTests(unittest.TestCase):
             probe = (
                 "import sys; sys.path.insert(0, sys.argv[1]); "
                 "import package_latest_bios; "
-                "print(package_latest_bios.DEFAULT_REPACKAGING_DIR)"
+                "print(package_latest_bios.DEFAULT_REPACKAGING_DIR); "
+                "print(package_latest_bios.UPLOAD_SCRIPT)"
             )
             result = subprocess.run(
                 [sys.executable, "-c", probe, str(deployed)],
@@ -152,7 +153,10 @@ class DeploymentPathTests(unittest.TestCase):
                 timeout=30,
                 check=True,
             )
-            self.assertEqual(result.stdout.strip(), str(deployed.resolve()))
+            self.assertEqual(result.stdout.splitlines(), [
+                str(deployed.resolve()),
+                str(deployed.resolve() / "Upload-BiosMmc.ps1"),
+            ])
 
 
 class BuildSelectionTests(unittest.TestCase):

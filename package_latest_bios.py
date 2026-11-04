@@ -33,6 +33,7 @@ DEFAULT_OUTPUT_DIR = Path(r"C:\LocalPath\Bios")
 WORKSPACE_DIR = Path(r"C:\ATF")
 DEFAULT_CONFIG_INI = "config_oak_ap.ini"
 DEFAULT_LOG_DIR = Path(__file__).resolve().parent / "logs"
+UPLOAD_SCRIPT = Path(__file__).resolve().with_name("Upload-BiosMmc.ps1")
 BUILD_PATTERN = re.compile(
     r"OAKSTRM\.0\.RPB\.(?P<release>\d{4})\.D\.(?P<revision>\d+)"
 )
@@ -590,9 +591,53 @@ def configure_logging(log_dir: Path) -> None:
     )
 
 
+def upload_archives(bios_archive: Path, mmc_archive: Path) -> bool:
+    if not UPLOAD_SCRIPT.is_file():
+        raise FileNotFoundError(f"Upload script not found: {UPLOAD_SCRIPT}")
+    powershell = shutil.which("powershell.exe")
+    if powershell is None:
+        raise FileNotFoundError("Windows PowerShell (powershell.exe) is required for upload.")
+    command = [
+        powershell, "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "-File", str(UPLOAD_SCRIPT),
+        "-BiosArchive", str(bios_archive.resolve()),
+        "-MmcArchive", str(mmc_archive.resolve()),
+    ]
+    LOGGER.info(
+        "BIOS and MMC are ready. Waiting for upload confirmation; "
+        "declining keeps both archives locally without requesting a token."
+    )
+    results: list[str] = []
+    with subprocess.Popen(
+        command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
+    ) as child:
+        if child.stdout is None:
+            raise RuntimeError("Upload script output pipe is unavailable.")
+        for line in child.stdout:
+            message = line.rstrip()
+            if message:
+                LOGGER.info("Artifactory: %s", message)
+            if message.startswith("UPLOAD_RESULT="):
+                results.append(message.removeprefix("UPLOAD_RESULT="))
+        returncode = child.wait()
+    if returncode:
+        raise subprocess.CalledProcessError(returncode, command)
+    if len(results) != 1 or results[0] not in ("completed", "cancelled"):
+        raise RuntimeError("Upload script did not report one valid completed/cancelled result.")
+    if results[0] == "cancelled":
+        LOGGER.info("Upload cancelled by the user; verified local archives retained.")
+        return False
+    LOGGER.info("BIOS and MMC Artifactory upload/verification completed.")
+    return True
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Package the newest OakStream BIOS and its matching MMC firmware."
+        description=(
+            "Package the newest OakStream BIOS and its matching MMC firmware, "
+            "then ask for confirmation before Artifactory upload."
+        )
     )
     parser.add_argument("--artifactory-url", default=DEFAULT_ARTIFACTORY_URL)
     parser.add_argument(
@@ -612,6 +657,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--dry-run", action="store_true",
         help="Preview source selection without packaging or downloading firmware.",
+    )
+    parser.add_argument(
+        "--no-upload", action="store_true",
+        help="Keep local BIOS/MMC archives without showing the upload confirmation.",
     )
     args = parser.parse_args(argv)
     try:
@@ -633,7 +682,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 0
         else:
             bios_archive = args.bios_archive
-        package_mmc_fw(
+        mmc_archive = package_mmc_fw(
             bios_archive,
             artifactory_url=args.mmc_artifactory_url,
             repackaging_dir=args.repackaging_dir,
@@ -646,6 +695,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     ):
         LOGGER.exception("BIOS/MMC packaging failed.")
         return 1
+    if not args.dry_run and not args.no_upload:
+        try:
+            upload_archives(bios_archive, mmc_archive)
+        except (OSError, RuntimeError, subprocess.CalledProcessError):
+            LOGGER.exception(
+                "Artifactory upload failed; verified local BIOS/MMC archives are retained. "
+                "Retry Upload-BiosMmc.ps1 without rebuilding."
+            )
+            return 1
     return 0
 
 

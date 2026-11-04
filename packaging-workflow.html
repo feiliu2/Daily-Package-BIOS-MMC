@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="每日 BIOS 与匹配 MMC 固件的自动打包流程、执行命令、验证和清理规则。">
+  <meta name="description" content="每日 BIOS 与匹配 MMC 固件的自动打包流程、确认后上传 Artifactory、执行命令、验证和清理规则。">
   <title>BIOS + MMC 每日打包流程</title>
   <style>
     :root {
@@ -252,6 +252,7 @@
       <nav class="nav" aria-label="页面导航">
         <a href="#workflow">打包流程</a>
         <a href="#commands">运行命令</a>
+        <a href="#upload">确认后上传</a>
         <a href="#safety">安全与失败处理</a>
         <button class="print-button" type="button" onclick="window.print()">打印 / 保存 PDF</button>
       </nav>
@@ -262,11 +263,12 @@
         <div>
           <p class="eyebrow">DAILY BUILD / WINDOWS AUTOMATION</p>
           <h1 id="page-title">每日 BIOS 打包<br><span>与匹配 MMC 固件</span></h1>
-          <p class="hero-description">从 Artifactory 获取最新 BIOS，使用原始命令完成打包，再从 BIOS 中读取 MMC 版本，生成对应固件包。最终只留下需要的压缩包。</p>
+          <p class="hero-description">从 Artifactory 获取最新 BIOS，使用原始命令完成打包，再从 BIOS 中读取 MMC 版本，生成对应固件包。两份本地产物校验成功后，先询问是否上传，经确认才直传到各自的 Artifactory 目录。</p>
           <div class="chips">
             <span class="chip">默认 15:00 · 本机时间</span>
             <span class="chip">MMC 跟随 BIOS 版本</span>
             <span class="chip">验证后发布与清理</span>
+            <span class="chip">上传前必须确认</span>
           </div>
         </div>
         <aside class="deliverables" aria-label="最终产物示例">
@@ -424,7 +426,7 @@ Archive: 0040.D79.7z</code></pre>
 Set-Location 'C:\OKS'
 edkrepo clone OakStreamAPIfwi OakStreamAPIfwi</code></pre>
             <p>命令会创建 <code>C:\OKS\OakStreamAPIfwi</code>。已有该源码工作区时直接复用，跳过 clone，不覆盖或删除现有源码。每日任务不会自动 clone。</p>
-            <p>将 <code>package_latest_bios.py</code> 与 <code>Register-BiosPackagingTask.ps1</code> 部署到原 <code>BIOS_Repackaging</code> 目录，与 <code>restructure_new.py</code>、<code>Config</code> 和 <code>7-Zip</code> 放在一起；若源码分支已包含这两个文件，无需再复制。默认按自动化脚本所在目录定位原工具。</p>
+            <p>将 <code>package_latest_bios.py</code>、<code>Register-BiosPackagingTask.ps1</code> 与 <code>Upload-BiosMmc.ps1</code> 三个自动化文件部署到原 <code>BIOS_Repackaging</code> 目录，与 <code>restructure_new.py</code>、<code>Config</code> 和 <code>7-Zip</code> 放在一起；若源码分支已包含这三个文件，无需再复制。默认按自动化脚本所在目录定位原工具。上传还需要 Windows PowerShell 5.1 与可用的 <code>curl.exe</code>。</p>
             <details>
               <summary>自动化脚本与原工具不同目录时</summary>
               <pre><code>python .\package_latest_bios.py --repackaging-dir "C:\OKS\OakStreamAPIfwi\Ifwi\oak_release\BuildScripts\CommonLib\BIOS_Repackaging" --dry-run</code></pre>
@@ -438,6 +440,9 @@ edkrepo clone OakStreamAPIfwi OakStreamAPIfwi</code></pre>
             <p>查询最新 BIOS 并显示计划命令。不执行原打包器，不猜测尚未生成的新 BIOS 的 MMC 版本。</p>
             <span class="command-label">实际执行</span>
             <pre><code>python .\package_latest_bios.py</code></pre>
+            <p>两份压缩包都成功后，弹窗确认是否上传。点“否”保留本地产物；点“是”才输入一次 Token 并上传。</p>
+            <span class="command-label">仅打包，不显示上传确认框</span>
+            <pre><code>python .\package_latest_bios.py --no-upload</code></pre>
           </article>
           <article class="command-card">
             <h3>只补打 MMC：保留现有 BIOS</h3>
@@ -457,8 +462,40 @@ edkrepo clone OakStreamAPIfwi OakStreamAPIfwi</code></pre>
             <p>注册不会立即打包，也不会覆盖已存在的同名任务。可使用 <code>-At '15:30'</code> 修改时间，使用 <code>-PythonPath</code> 指定已有依赖的 Python。Python 需为 3.10 或更新版本。</p>
             <details>
               <summary>查看调度前提与重试策略</summary>
-              <p>电脑需开机，当前用户需保持登录，并连接 Intel 网络 / VPN。错过时间后会在条件满足时补跑；失败最多重试 3 次，间隔 15 分钟；忽略重叠的计划任务实例；总执行上限 4 小时。BIOS 子进程上限 3 小时，每个 7-Zip 步骤上限 30 分钟。</p>
+              <p>电脑需开机，当前用户需保持登录，并连接 Intel 网络 / VPN。错过时间后会在条件满足时补跑；失败最多重试 3 次，间隔 15 分钟；忽略重叠的计划任务实例；总执行上限 4 小时。BIOS 子进程上限 3 小时，每个 7-Zip 步骤上限 30 分钟。上传不是无人值守操作：必须确认并输入 Token；等待确认也计入任务的 4 小时限制。上传错误触发原任务重试时会重新打包并再次询问，只重试传输时应单独运行上传脚本。</p>
             </details>
+          </article>
+        </div>
+      </section>
+
+      <section id="upload" aria-labelledby="upload-title">
+        <div class="section-heading">
+          <h2 id="upload-title">本地打包完成 → 确认后上传</h2>
+          <p>独立脚本可重用；每日流程传入本次实际生成的两个文件，不重新猜测版本</p>
+        </div>
+        <div class="command-grid">
+          <article class="command-card">
+            <h3>只上传现有压缩包</h3>
+            <span class="command-label">预览：无弹窗、无 Token、无 HTTP 请求</span>
+            <pre><code>.\Upload-BiosMmc.ps1 -WhatIf</code></pre>
+            <span class="command-label">确认后直传</span>
+            <pre><code>.\Upload-BiosMmc.ps1</code></pre>
+            <p>默认读取 <code>C:\LocalPath\Bios</code>，必须恰好有一个 BIOS 包和一个 <code>MMCFW_版本.7z</code>。不重打包、不改名、不删除文件。独立上传仅按文件名选择，需自行选择匹配的一组。</p>
+            <details>
+              <summary>修改本地目录或显式选择两个文件</summary>
+              <pre><code>.\Upload-BiosMmc.ps1 -SourceDirectory 'D:\Firmware'
+.\Upload-BiosMmc.ps1 -BiosArchive 'C:\LocalPath\Bios\0040.D82.7z' -MmcArchive 'C:\LocalPath\Bios\MMCFW_0.1022.0.7z'</code></pre>
+              <p>显式路径必须成对提供。缺包、空包、多包或不符合命名规则时会报错，不自动选择最新文件。</p>
+            </details>
+          </article>
+          <article class="command-card">
+            <h3>一次确认、一次 Token、两个目标</h3>
+            <p>先显示文件与目标的 Yes / No / Cancel 确认框，默认 <strong>No</strong>。选 No、Cancel 或关闭窗口都不会请求 Token 或访问网络，不影响本地成功的打包。</p>
+            <p>同意后，在 Windows 凭据框的 <strong>Password</strong> 栏粘贴 Artifactory Access Token，用户名保持不变；取消凭据框也不会上传。</p>
+            <p>BIOS → <a href="https://af01p-sc.devtools.intel.com/ui/repos/tree/General/DEG-IFWI-LOCAL/FIV_Portal/IFWI_CI/BIOSID" target="_blank" rel="noopener noreferrer">DEG-IFWI-LOCAL / FIV_Portal / IFWI_CI / BIOSID</a></p>
+            <p>MMC → <a href="https://af01p-sc.devtools.intel.com/ui/repos/tree/General/DEG-IFWI-LOCAL/FIV_Portal/IFWI_CI/MMC" target="_blank" rel="noopener noreferrer">DEG-IFWI-LOCAL / FIV_Portal / IFWI_CI / MMC</a></p>
+            <p>先预检两端文件，再用原生 <code>curl.exe</code> 经 HTTPS PUT 直传，保留文件名；核对远端路径、准确字节数和 SHA-256 后才报告成功。相同文件跳过，同名不同内容则停止，不覆盖。</p>
+            <p>Token 只留在本次进程内，通过 stdin 交给 curl，不放进命令行、文件、环境变量或日志。不要将 Token 发到聊天里。</p>
           </article>
         </div>
       </section>
@@ -485,8 +522,12 @@ edkrepo clone OakStreamAPIfwi OakStreamAPIfwi</code></pre>
             <h3>缓存清理：只重试可恢复锁定</h3>
             <p>Windows 文件共享 / 锁定错误 32、33 最多重试 5 次，间隔 2 秒。持续锁定、其他权限问题或清理失败会明确报错，不跳过检查后宣告任务完成。</p>
           </article>
+          <article class="rule safe">
+            <h3>上传失败：保留产物，单独重试</h3>
+            <p>打包失败或预览模式不进入上传确认。上传 / 校验失败会返回非零，保留本地文件；若 BIOS 已成功而 MMC 失败，不删除已验证的远端 BIOS。重新运行独立上传脚本会跳过相同文件，只补传缺失部分。每个上传限时 30 分钟，元数据请求限时 60 秒。</p>
+          </article>
         </div>
-        <div class="logs"><strong>排查日志：</strong><code>logs\package-bios-YYYYMMDD.log</code> 记录 BIOS / MMC 的选择、执行与结果，并与控制台同步显示原 BIOS 最终 summary 和组件包统计；<code>logs\restructure-*.log</code> 仍保留完整原始输出。日志位于自动化脚本旁边的 logs 目录，不随 C:\ATF 或固件输出清理。</div>
+        <div class="logs"><strong>排查日志：</strong><code>logs\package-bios-YYYYMMDD.log</code> 记录 BIOS / MMC 的选择、执行与结果，并与控制台同步显示原 BIOS 最终 summary、组件包统计，以及集成上传的取消 / 跳过 / 成功 / 失败结果；<code>logs\restructure-*.log</code> 仍保留完整原始输出。日志位于自动化脚本旁边的 logs 目录，不随 C:\ATF 或固件输出清理。独立上传只向调用它的控制台输出，不保存 Token。</div>
       </section>
     </main>
 

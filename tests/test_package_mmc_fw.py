@@ -349,12 +349,22 @@ class MmcOrchestrationTests(unittest.TestCase):
         )
         self.bios = bios_patch.start()
         self.addCleanup(bios_patch.stop)
-        mmc_patch = mock.patch.object(packager, "package_mmc_fw")
+        mmc_patch = mock.patch.object(
+            packager, "package_mmc_fw", return_value=Path("MMCFW_0.1022.0.7z")
+        )
         self.mmc = mmc_patch.start()
         self.addCleanup(mmc_patch.stop)
+        upload_patch = mock.patch.object(packager, "upload_archives", return_value=True)
+        self.upload = upload_patch.start()
+        self.addCleanup(upload_patch.stop)
 
     def test_default_run_packages_mmc_after_successful_bios(self) -> None:
-        self.mmc.side_effect = lambda *args, **kwargs: self.bios.assert_called_once()
+        def finish_mmc(*args: object, **kwargs: object) -> Path:
+            self.bios.assert_called_once()
+            self.upload.assert_not_called()
+            return Path("MMCFW_0.1022.0.7z")
+
+        self.mmc.side_effect = finish_mmc
         self.assertEqual(packager.main([]), 0)
         self.bios.assert_called_once()
         self.assertEqual(
@@ -367,6 +377,9 @@ class MmcOrchestrationTests(unittest.TestCase):
             repackaging_dir=packager.DEFAULT_REPACKAGING_DIR,
             output_dir=packager.DEFAULT_OUTPUT_DIR,
             dry_run=False,
+        )
+        self.upload.assert_called_once_with(
+            Path("0040.D79.7z"), Path("MMCFW_0.1022.0.7z")
         )
 
     def test_explicit_repackaging_directory_overrides_both_modes(self) -> None:
@@ -390,11 +403,15 @@ class MmcOrchestrationTests(unittest.TestCase):
         self.assertEqual(packager.main(["--bios-archive", "existing.7z"]), 0)
         self.bios.assert_not_called()
         self.assertEqual(self.mmc.call_args.args[0], Path("existing.7z"))
+        self.upload.assert_called_once_with(
+            Path("existing.7z"), Path("MMCFW_0.1022.0.7z")
+        )
 
     def test_default_dry_run_does_not_guess_mmc_from_an_old_archive(self) -> None:
         self.assertEqual(packager.main(["--dry-run"]), 0)
         self.assertTrue(self.bios.call_args.kwargs["dry_run"])
         self.mmc.assert_not_called()
+        self.upload.assert_not_called()
 
     def test_existing_bios_dry_run_is_forwarded_to_mmc(self) -> None:
         self.assertEqual(
@@ -402,12 +419,39 @@ class MmcOrchestrationTests(unittest.TestCase):
         )
         self.bios.assert_not_called()
         self.assertTrue(self.mmc.call_args.kwargs["dry_run"])
+        self.upload.assert_not_called()
+
+    def test_no_upload_retains_normal_packaging_without_a_prompt(self) -> None:
+        self.assertEqual(packager.main(["--no-upload"]), 0)
+        self.bios.assert_called_once()
+        self.mmc.assert_called_once()
+        self.upload.assert_not_called()
+
+    def test_user_declining_upload_does_not_fail_successful_packaging(self) -> None:
+        self.upload.return_value = False
+        self.assertEqual(packager.main([]), 0)
+        self.upload.assert_called_once()
+
+    def test_upload_failure_is_distinct_from_packaging_failure(self) -> None:
+        self.upload.side_effect = RuntimeError("Upload verification failed")
+        with self.assertLogs("bios_packager", level="ERROR") as logged:
+            self.assertEqual(packager.main([]), 1)
+        self.assertIn("verified local BIOS/MMC archives are retained", "\n".join(logged.output))
+        self.assertNotIn("BIOS/MMC packaging failed", "\n".join(logged.output))
 
     def test_mmc_failure_is_logged_and_returns_nonzero(self) -> None:
         self.mmc.side_effect = RuntimeError("MMC source missing")
         with self.assertLogs("bios_packager", level="ERROR") as logged:
             self.assertEqual(packager.main([]), 1)
         self.assertIn("MMC source missing", "\n".join(logged.output))
+        self.upload.assert_not_called()
+
+    def test_bios_failure_does_not_start_mmc_or_upload(self) -> None:
+        self.bios.side_effect = RuntimeError("BIOS failed")
+        with self.assertLogs("bios_packager", level="ERROR"):
+            self.assertEqual(packager.main([]), 1)
+        self.mmc.assert_not_called()
+        self.upload.assert_not_called()
 
     @mock.patch.object(packager.time, "sleep")
     def test_owned_workspace_removal_retries_directory_lock(self, sleep: mock.Mock) -> None:

@@ -47,7 +47,7 @@ $settings = New-ScheduledTaskSettingsSet `
     -ExecutionTimeLimit (New-TimeSpan -Hours 4)
 $task = New-ScheduledTask `
     -Action $action -Trigger $trigger -Principal $principal -Settings $settings `
-    -Description 'Package the newest OakStream BIOS and its matching MMC firmware; retain only the latest archive pair and clear C:\ATF after BIOS verification.'
+    -Description 'Package the newest BIOS and matching MMC, retain the latest pair and clear C:\ATF after verification; ask the logged-in user before Artifactory upload.'
 
 [pscustomobject]@{
     TaskName = $TaskName
