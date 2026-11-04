@@ -436,6 +436,60 @@ def clear_workspace(workspace: Path, *, remove_directory: bool = False) -> None:
             time.sleep(2)
 
 
+def log_packager_summary(log_file: Path) -> None:
+    total: int | None = None
+    not_packaged: int | None = None
+    summary: list[str] = []
+    completed = False
+    with log_file.open(encoding="utf-8", errors="replace") as source:
+        for line in source:
+            _, separator, message = line.partition(" -->> ")
+            message = (message if separator else line).strip()
+            if not message:
+                continue
+            if message == "=======Restructure info=======":
+                total = 0
+                not_packaged = None
+                summary.clear()
+                completed = False
+            elif total is not None and message.startswith("To be packaged file==>"):
+                total += 1
+            if message == "=======Restructure Package Done=======":
+                completed = True
+            if completed:
+                summary.append(message)
+                match = re.fullmatch(r"Total not packaged files:\[\s*(\d+)\s*\]", message)
+                if match:
+                    not_packaged = int(match[1])
+                if message.startswith("Spend total time:"):
+                    break
+
+    if not summary:
+        LOGGER.warning(
+            "Original BIOS packager final summary is unavailable or incomplete; see %s",
+            log_file,
+        )
+        return
+    reliable = (
+        total is not None and total > 0
+        and not_packaged is not None and 0 <= not_packaged <= total
+    )
+    level = logging.INFO if reliable and not_packaged == 0 else logging.WARNING
+    LOGGER.log(level, "Original BIOS packager final summary:\n%s", "\n".join(summary))
+    if total is None or total <= 0 or not_packaged is None or not 0 <= not_packaged <= total:
+        LOGGER.warning(
+            "BIOS component package counts are unavailable or inconsistent; see %s",
+            log_file,
+        )
+        return
+    LOGGER.log(
+        level,
+        "BIOS component package summary (original report): "
+        "total=%s, packaged=%s, not packaged=%s",
+        total, total - not_packaged, not_packaged,
+    )
+
+
 def package_latest(
     *,
     artifactory_url: str,
@@ -492,17 +546,26 @@ def package_latest(
     environment = os.environ.copy()
     environment["PYTHONIOENCODING"] = "utf-8"
     environment["PYTHONUNBUFFERED"] = "1"
-    with child_log.open("w", encoding="utf-8") as output:
-        subprocess.run(
-            command,
-            cwd=repackaging_dir,
-            stdin=subprocess.DEVNULL,
-            stdout=output,
-            stderr=subprocess.STDOUT,
-            env=environment,
-            timeout=10800,
-            check=True,
-        )
+    try:
+        with child_log.open("w", encoding="utf-8") as output:
+            subprocess.run(
+                command,
+                cwd=repackaging_dir,
+                stdin=subprocess.DEVNULL,
+                stdout=output,
+                stderr=subprocess.STDOUT,
+                env=environment,
+                timeout=10800,
+                check=True,
+            )
+    finally:
+        if child_log.is_file():
+            log_packager_summary(child_log)
+        else:
+            LOGGER.warning(
+                "Original BIOS packager log is missing; summary unavailable: %s",
+                child_log,
+            )
     validate_archive(destination, seven_zip)
     workspace = validate_packaging_paths(
         output_dir, repackaging_dir, log_dir, config_file

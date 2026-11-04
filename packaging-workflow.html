@@ -340,7 +340,8 @@ Archive: 0040.D79.7z</code></pre>
               </li>
               <li class="step">
                 <div class="step-heading"><span class="step-number" aria-hidden="true">04</span><h3>验证 BIOS，再清空缓存</h3></div>
-                <p>原命令成功退出后，确认压缩包存在且非空，并执行完整 <code>7z t</code> 校验。</p>
+                <p>子进程结束后，将原脚本最终 summary 同步显示到控制台和每日总日志：组件 / 构建包总数、已打包数、未打包数、未打包清单和原始耗时。这里统计的是源组件包，不是压缩包内的文件数量。</p>
+                <p>原命令成功退出后，确认压缩包存在且非空，并执行完整 <code>7z t</code> 校验。未打包数量非零时显示警告；报告缺失或不完整时明确提示，不把未知数量当成零。</p>
                 <p><strong>仅验证成功后</strong>清空 <code>C:\ATF</code> 内的文件和子目录，保留 <code>C:\ATF</code> 目录本身。随后才进入 MMC 阶段。</p>
                 <span class="tag">BIOS 验证失败 &rarr; 不执行最终缓存清理</span>
               </li>
@@ -485,7 +486,7 @@ edkrepo clone OakStreamAPIfwi OakStreamAPIfwi</code></pre>
             <p>Windows 文件共享 / 锁定错误 32、33 最多重试 5 次，间隔 2 秒。持续锁定、其他权限问题或清理失败会明确报错，不跳过检查后宣告任务完成。</p>
           </article>
         </div>
-        <div class="logs"><strong>排查日志：</strong><code>logs\package-bios-YYYYMMDD.log</code> 记录 BIOS / MMC 的选择、执行与结果；<code>logs\restructure-*.log</code> 保存原 BIOS 子进程输出。日志位于自动化脚本旁边的 logs 目录，不随 C:\ATF 或固件输出清理。</div>
+        <div class="logs"><strong>排查日志：</strong><code>logs\package-bios-YYYYMMDD.log</code> 记录 BIOS / MMC 的选择、执行与结果，并与控制台同步显示原 BIOS 最终 summary 和组件包统计；<code>logs\restructure-*.log</code> 仍保留完整原始输出。日志位于自动化脚本旁边的 logs 目录，不随 C:\ATF 或固件输出清理。</div>
       </section>
     </main>
 

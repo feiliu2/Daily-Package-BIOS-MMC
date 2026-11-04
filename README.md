@@ -148,7 +148,11 @@ The wrapper limits the BIOS child to three hours and each 7-Zip step to
 3. The original script uses `C:\ATF` for downloads/extracted files and writes the
    archive directly to `C:\LocalPath\Bios`. The original INI is read, not modified;
    no temporary INI or alternate workspace/output directory is created.
-4. After the command exits successfully, validate the archive with the bundled
+4. After the child finishes, repeat its final summary in the console and daily
+   log: total component packages, packaged/not-packaged counts, missing package
+   names and the original elapsed time. These counts describe the source
+   component/build packages, not individual files inside the BIOS archive.
+   If the child exited successfully, validate the archive with the bundled
    `7-Zip\7z.exe t`.
 5. Only after validation succeeds, delete the contents of `C:\ATF`, leaving the
    directory itself empty.
@@ -220,6 +224,13 @@ preserved.** This latest-pair-only behavior is intentional. The standalone
 - Each run has a separate `restructure-*.log`. The daily `package-bios-*.log`
   contains BIOS/MMC selection, command and result information. Logs are retained outside
   the workspace and BIOS output directory.
+- The original BIOS final summary is echoed to both the console and daily log
+  before archive verification/cleanup, including on a failed child exit when
+  that report is available. Nonzero not-packaged counts are shown as warnings.
+  Missing, incomplete or inconsistent reports are explicitly warned about;
+  unknown counts are never displayed as zero. The full child log remains
+  available for investigation. Reporting does not change the original exit-code,
+  archive-verification or cleanup rules.
 
 ## Tests
 

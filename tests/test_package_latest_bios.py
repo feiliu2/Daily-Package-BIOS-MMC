@@ -9,6 +9,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from io import TextIOBase
 from pathlib import Path
 from unittest import mock
 from urllib.error import URLError
@@ -19,6 +20,111 @@ from seven_zip_support import SEVEN_ZIP_DIRECTORY, copy_seven_zip
 
 def index_page(*names: str) -> str:
     return "\n".join(f'<a href="{name}">{name}</a>' for name in names)
+
+
+def summary_text(total: int = 3, missing: tuple[str, ...] = ()) -> str:
+    messages = [
+        "=======Restructure info=======",
+        *(f"To be packaged file==> {{'{index}': ['fixture-{index}', ['target']]}}"
+          for index in range(total)),
+        "=======Restructure Package Done=======",
+        "Not Found Files As Blow:",
+        *missing,
+        f"Total not packaged files:[{len(missing)}]",
+        "Spend total time:12.5",
+    ]
+    return "".join(
+        f"[2026-11-04 09:00:00,000] - restructure_new - [line:370] "
+        f"- INFO -->> {message}\n" for message in messages
+    )
+
+
+class PackagerSummaryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory(prefix="bios-summary-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.log_file = self.root / "restructure.log"
+
+    def test_successful_report_shows_component_counts_and_original_elapsed_time(self) -> None:
+        self.log_file.write_text(summary_text(10), encoding="utf-8")
+        with self.assertLogs("bios_packager", level="INFO") as logged:
+            packager.log_packager_summary(self.log_file)
+        text = "\n".join(logged.output)
+        self.assertIn("total=10, packaged=10, not packaged=0", text)
+        self.assertIn("Total not packaged files:[0]", text)
+        self.assertIn("Spend total time:12.5", text)
+        self.assertNotIn("To be packaged file==>", text)
+        self.assertTrue(all(record.levelname == "INFO" for record in logged.records))
+
+    def test_missing_packages_are_named_and_reported_as_warnings(self) -> None:
+        self.log_file.write_text(summary_text(3, ("missing_BuildPkg",)), encoding="utf-8")
+        with self.assertLogs("bios_packager", level="WARNING") as logged:
+            packager.log_packager_summary(self.log_file)
+        text = "\n".join(logged.output)
+        self.assertIn("total=3, packaged=2, not packaged=1", text)
+        self.assertIn("missing_BuildPkg", text)
+
+    def test_missing_final_report_does_not_invent_successful_counts(self) -> None:
+        for content in (
+            "", "Traceback: packaging failed\n",
+            "=======Restructure info=======\nTo be packaged file==> pending\n",
+        ):
+            with self.subTest(content=content):
+                self.log_file.write_text(content, encoding="utf-8")
+                with self.assertLogs("bios_packager", level="WARNING") as logged:
+                    packager.log_packager_summary(self.log_file)
+                text = "\n".join(logged.output)
+                self.assertIn("unavailable or incomplete", text)
+                self.assertNotIn("total=", text)
+
+    def test_incomplete_or_inconsistent_counts_preserve_original_report(self) -> None:
+        for content in (
+            summary_text(1, ("missing-one", "missing-two")),
+            summary_text(1).replace("Total not packaged files:[0]", "counter missing"),
+            summary_text(1).replace("=======Restructure info=======", "header missing"),
+            summary_text(0),
+        ):
+            with self.subTest(content=content):
+                self.log_file.write_text(content, encoding="utf-8")
+                with self.assertLogs("bios_packager", level="WARNING") as logged:
+                    packager.log_packager_summary(self.log_file)
+                text = "\n".join(logged.output)
+                self.assertIn("Original BIOS packager final summary", text)
+                self.assertIn("counts are unavailable or inconsistent", text)
+                self.assertNotIn("total=", text)
+
+    def test_plain_unprefixed_report_is_supported(self) -> None:
+        content = "\n".join(
+            line.partition(" -->> ")[2] for line in summary_text(2).splitlines()
+        )
+        self.log_file.write_text(content, encoding="utf-8")
+        with self.assertLogs("bios_packager", level="INFO") as logged:
+            packager.log_packager_summary(self.log_file)
+        self.assertIn("total=2, packaged=2, not packaged=0", "\n".join(logged.output))
+
+    def test_report_reaches_both_console_and_daily_log_in_a_real_process(self) -> None:
+        self.log_file.write_text(summary_text(2), encoding="utf-8")
+        logs = self.root / "logs"
+        probe = (
+            "import sys; from pathlib import Path; import package_latest_bios as p; "
+            "p.configure_logging(Path(sys.argv[1])); "
+            "p.log_packager_summary(Path(sys.argv[2]))"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", probe, str(logs), str(self.log_file)],
+            cwd=Path(packager.__file__).resolve().parent,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=30,
+            check=True,
+        )
+        daily_log = next(logs.glob("package-bios-*.log")).read_text(encoding="utf-8")
+        for output in (result.stderr, daily_log):
+            self.assertIn("total=2, packaged=2, not packaged=0", output)
+            self.assertIn("Total not packaged files:[0]", output)
 
 
 class DeploymentPathTests(unittest.TestCase):
@@ -173,6 +279,9 @@ class PackagingTests(unittest.TestCase):
             shutil.rmtree(self.output)
         self.output.mkdir()
         (self.output / self.build.package_name).write_bytes(b"packaged BIOS")
+        output = kwargs["stdout"]
+        assert isinstance(output, TextIOBase)
+        output.write(summary_text(1))
         return subprocess.CompletedProcess(command, 0)
 
     @mock.patch.object(packager.subprocess, "run")
@@ -199,6 +308,24 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(self.config_file.read_text(), self.original_config)
         validate.assert_called_once()
         self.assertEqual(list(self.output.iterdir()), [destination])
+
+    @mock.patch.object(packager, "validate_archive")
+    @mock.patch.object(packager.subprocess, "run")
+    def test_missing_child_log_is_reported_without_inventing_a_summary(
+        self, run: mock.Mock, validate: mock.Mock
+    ) -> None:
+        run.side_effect = self.fake_packager
+        original_is_file = Path.is_file
+
+        def log_unavailable(path: Path) -> bool:
+            return False if path.parent == self.logs else original_is_file(path)
+
+        with mock.patch.object(Path, "is_file", log_unavailable):
+            with self.assertLogs("bios_packager", level="WARNING") as logged:
+                self.package()
+        self.assertIn("log is missing; summary unavailable", "\n".join(logged.output))
+        validate.assert_called_once()
+        self.assertEqual(list(self.workspace.iterdir()), [])
 
     @mock.patch.object(packager, "validate_archive")
     @mock.patch.object(packager.subprocess, "run")
@@ -242,6 +369,32 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(list(self.output.iterdir()), [])
         self.assertEqual(self.config_file.read_text(), self.original_config)
         self.assertEqual(self.cached_file.read_bytes(), b"old download")
+
+    @mock.patch.object(packager, "validate_archive")
+    @mock.patch.object(packager.subprocess, "run")
+    def test_child_errors_still_show_summary_without_validating_or_cleaning(
+        self, run: mock.Mock, validate: mock.Mock
+    ) -> None:
+        for error in (
+            subprocess.CalledProcessError(2, ["fake packager"]),
+            subprocess.TimeoutExpired(["fake packager"], 1),
+        ):
+            with self.subTest(error=type(error).__name__):
+                def fail_after_report(
+                    command: list[str], **kwargs: object
+                ) -> subprocess.CompletedProcess[str]:
+                    self.fake_packager(command, **kwargs)
+                    raise error
+
+                run.side_effect = fail_after_report
+                with self.assertLogs("bios_packager", level="INFO") as logged:
+                    with self.assertRaises(type(error)):
+                        self.package()
+                self.assertIn(
+                    "total=1, packaged=1, not packaged=0", "\n".join(logged.output)
+                )
+                self.assertEqual(self.cached_file.read_bytes(), b"old download")
+                validate.assert_not_called()
 
     @mock.patch.object(packager, "validate_archive")
     @mock.patch.object(packager.subprocess, "run")
@@ -460,13 +613,16 @@ class PackagingTests(unittest.TestCase):
             )
             """
         )
+        fake_legacy_script += f"\nprint({summary_text(1)!r}, end='')\n"
         (self.source / "restructure_new.py").write_text(
             fake_legacy_script, encoding="utf-8"
         )
         self.output.mkdir()
         old_archive = self.output / "0040.D77.7z"
         old_archive.write_bytes(b"previous BIOS")
-        destination = self.package()
+        with self.assertLogs("bios_packager", level="INFO") as logged:
+            destination = self.package()
+        self.assertIn("total=1, packaged=1, not packaged=0", "\n".join(logged.output))
         extracted = subprocess.run(
             [
                 str(self.source / "7-Zip" / "7z.exe"),
