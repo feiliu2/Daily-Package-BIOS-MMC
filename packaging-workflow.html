@@ -297,7 +297,7 @@
           </article>
           <article class="source-card">
             <h3>映射 · biosid_oak_ap.xlsx</h3>
-            <p>每次运行都从 GitHub 仓库 <code>intel-innersource/firmware.boot.uefi.iafw.devops.build.ifwi</code> 的 <code>oak_release/BuildScripts/CommonLib/BIOS_Repackaging/</code> 拉取，默认 <code>release/ap.post-silicon</code> 分支（该仓库的 <code>main</code> 分支里没有这个文件），需要设置 <code>IFWI_GITHUB_TOKEN</code>（FIV Ubuntu 镜像 v1.1.3 起已内置）。拉取失败直接报错，不回退到旧缓存。</p>
+            <p>每次运行都从 GitHub 仓库 <code>intel-innersource/firmware.boot.uefi.iafw.devops.build.ifwi</code> 的 <code>oak_release/BuildScripts/CommonLib/BIOS_Repackaging/</code> 拉取，默认 <code>release/ap.post-silicon</code> 分支（该仓库的 <code>main</code> 分支里没有这个文件），需要设置 <code>IFWI_GITHUB_TOKEN</code>（FIV Ubuntu 镜像 v1.1.3 起已内置）。仓库、文件路径和分支分别可用 <code>--mapping-repo</code>、<code>--mapping-path</code>、<code>--mapping-ref</code> 修改，也可以用 <code>--mapping-url</code> 给出完整地址，或用 <code>--mapping-xlsx</code> 改用本地文件。实际使用的映射会记录在日志和 <code>--result-json</code> 的 <code>mapping</code> 字段中。拉取失败直接报错，不回退到旧缓存。</p>
           </article>
           <article class="source-card mmc">
             <h3>MMC · 查询 BIOS 指定版本</h3>

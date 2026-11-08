@@ -7,7 +7,7 @@ import io
 import posixpath
 import re
 import zipfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import quote
@@ -49,10 +49,55 @@ class ComponentPackage:
     rows: list[MappingRow] = field(default_factory=list)
 
 
-def default_mapping_url(ref: str = DEFAULT_MAPPING_REF) -> str:
+@dataclass(frozen=True)
+class MappingSource:
+    """Where the mapping came from; recorded in the log and in --result-json."""
+
+    kind: str  # "github" (repo/path/ref), "url" (--mapping-url) or "local" (--mapping-xlsx)
+    location: str  # API URL, override URL or local path
+    repo: str | None = None
+    path: str | None = None
+    ref: str | None = None
+    sha256: str | None = None
+    component_packages: int | None = None
+    file_rows: int | None = None
+
+    def as_dict(self) -> dict[str, object]:
+        return dict(self.__dict__)
+
+
+_REPO_FORMAT = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+
+
+def mapping_url(
+    repo: str = DEFAULT_MAPPING_REPO,
+    path: str = DEFAULT_MAPPING_PATH,
+    ref: str = DEFAULT_MAPPING_REF,
+) -> str:
+    """GitHub contents API URL for <repo>/<path> at <ref>."""
+    repo = repo.strip().strip("/")
+    if not _REPO_FORMAT.fullmatch(repo) or ".." in repo.split("/"):
+        raise ValueError(f"--mapping-repo must be <owner>/<name>, got {repo!r}")
+    parts = [part for part in path.replace("\\", "/").split("/") if part]
+    if not parts or any(part in (".", "..") for part in parts):
+        raise ValueError(f"Invalid --mapping-path: {path!r}")
+    if not ref.strip():
+        raise ValueError("--mapping-ref must not be empty.")
     return (
-        f"{GITHUB_API}/repos/{DEFAULT_MAPPING_REPO}/contents/"
-        f"{quote(DEFAULT_MAPPING_PATH)}?ref={quote(ref, safe='')}"
+        f"{GITHUB_API}/repos/{repo}/contents/"
+        f"{quote('/'.join(parts))}?ref={quote(ref.strip(), safe='')}"
+    )
+
+
+def default_mapping_url(ref: str = DEFAULT_MAPPING_REF) -> str:
+    return mapping_url(DEFAULT_MAPPING_REPO, DEFAULT_MAPPING_PATH, ref)
+
+
+def github_source(repo: str, path: str, ref: str) -> MappingSource:
+    return MappingSource(
+        "github", mapping_url(repo, path, ref), repo=repo.strip().strip("/"),
+        path="/".join(p for p in path.replace("\\", "/").split("/") if p),
+        ref=ref.strip(),
     )
 
 
@@ -83,22 +128,29 @@ def fetch_mapping(url: str, token: str | None, http: HttpClient | None = None) -
 
 
 def load_mapping(
-    *, local_path: Path | None, url: str, token: str | None,
-    http: HttpClient | None = None,
-) -> list[ComponentPackage]:
-    if local_path is not None:
-        data = local_path.read_bytes()
-        source = str(local_path)
+    source: MappingSource, *, token: str | None, http: HttpClient | None = None,
+) -> tuple[list[ComponentPackage], MappingSource]:
+    """Read and parse the mapping; returns it with the source annotated."""
+    if source.kind == "local":
+        data = Path(source.location).read_bytes()
     else:
-        data = fetch_mapping(url, token, http)
-        source = url
+        data = fetch_mapping(source.location, token, http)
     components = parse_mapping(data)
+    loaded = replace(
+        source,
+        sha256=hashlib.sha256(data).hexdigest(),
+        component_packages=len(components),
+        file_rows=sum(len(component.rows) for component in components),
+    )
+    where = (
+        f"{loaded.repo}:{loaded.path}@{loaded.ref}" if loaded.kind == "github"
+        else loaded.location
+    )
     LOGGER.info(
         "BIOS mapping: %s (SHA-256 %s): %s component packages, %s file rows.",
-        source, hashlib.sha256(data).hexdigest(), len(components),
-        sum(len(component.rows) for component in components),
+        where, loaded.sha256, loaded.component_packages, loaded.file_rows,
     )
-    return components
+    return components, loaded
 
 
 def _column_index(reference: str) -> int:

@@ -79,6 +79,9 @@ class ResultJsonTests(CliFixture):
             (data["mmc"]["packaging"], data["mmc"]["upload"]), ("packaged", "not_requested")
         )
         self.assertTrue(data["started_at"] and data["finished_at"])
+        self.assertEqual(data["mapping"]["kind"], "github")
+        self.assertEqual(data["mapping"]["ref"], "release/ap.post-silicon")
+        self.assertTrue(data["mapping"]["path"].endswith("biosid_oak_ap.xlsx"))
 
     def test_full_flow_upload_with_published_mmc(self) -> None:
         published = RemoteArchive("MMC", MMC, "https://up.test/artifactory/REPO/MMC/" + MMC,
@@ -162,6 +165,7 @@ class ResultJsonTests(CliFixture):
             ("provided", sha(b"given bios")),
         )
         self.assertEqual(data["mmc"]["packaging"], "packaged")
+        self.assertIsNone(data["mapping"])
 
     def test_upload_subcommand(self) -> None:
         bios = self.root / "0040.D82.7z"

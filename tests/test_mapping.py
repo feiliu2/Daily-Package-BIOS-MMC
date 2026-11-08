@@ -98,10 +98,12 @@ class FetchMappingTests(unittest.TestCase):
         _Handler.responses["/x.xlsx"] = (
             200, make_xlsx(rows([PKG, "MAIN.fd", "Debug", "", "1P0"]))
         )
-        components = mapping.load_mapping(
-            local_path=None, url=self.base + "/x.xlsx", token="secret-token"
+        components, loaded = mapping.load_mapping(
+            mapping.MappingSource("url", self.base + "/x.xlsx"), token="secret-token"
         )
         self.assertEqual(len(components), 1)
+        self.assertEqual((loaded.component_packages, loaded.file_rows), (1, 1))
+        self.assertRegex(loaded.sha256, "^[0-9a-f]{64}$")
         headers = {key.lower(): value for key, value in _Handler.seen[0].items()}
         self.assertEqual(headers["authorization"], "Bearer secret-token")
         self.assertEqual(headers["accept"], "application/vnd.github.raw")
@@ -116,12 +118,12 @@ class FetchMappingTests(unittest.TestCase):
             with self.subTest(path=path):
                 with self.assertRaisesRegex(ValueError, message):
                     mapping.load_mapping(
-                        local_path=None, url=self.base + path, token="t"
+                        mapping.MappingSource("url", self.base + path), token="t"
                     )
 
     def test_missing_token_fails_before_any_request(self) -> None:
         with self.assertRaisesRegex(ValueError, "IFWI_GITHUB_TOKEN is not set"):
-            mapping.load_mapping(local_path=None, url=self.base + "/x", token=None)
+            mapping.load_mapping(mapping.MappingSource("url", self.base + "/x"), token=None)
         self.assertEqual(_Handler.seen, [])
 
     def test_default_url_points_at_ifwi_repository_ref(self) -> None:
@@ -131,6 +133,40 @@ class FetchMappingTests(unittest.TestCase):
             "firmware.boot.uefi.iafw.devops.build.ifwi/contents/oak_release/"
         ))
         self.assertTrue(url.endswith("biosid_oak_ap.xlsx?ref=release%2Fv1"))
+
+    def test_repo_path_and_ref_build_the_url(self) -> None:
+        self.assertEqual(
+            mapping.mapping_url("org/repo", "/a\\b/biosid_oak_sp.xlsx", " dev "),
+            "https://api.github.com/repos/org/repo/contents/a/b/biosid_oak_sp.xlsx?ref=dev",
+        )
+        source = mapping.github_source("org/repo/", "x/m.xlsx", "v1")
+        self.assertEqual((source.kind, source.repo, source.path, source.ref),
+                         ("github", "org/repo", "x/m.xlsx", "v1"))
+
+    def test_invalid_repo_path_or_ref_is_rejected(self) -> None:
+        for repo, path, ref, option in (
+            ("just-a-name", "m.xlsx", "main", "--mapping-repo"),
+            ("org/repo/extra", "m.xlsx", "main", "--mapping-repo"),
+            ("org/..", "m.xlsx", "main", "--mapping-repo"),
+            ("org/repo", "", "main", "--mapping-path"),
+            ("org/repo", "a/../m.xlsx", "main", "--mapping-path"),
+            ("org/repo", "m.xlsx", " ", "--mapping-ref"),
+        ):
+            with self.subTest(repo=repo, path=path, ref=ref):
+                with self.assertRaisesRegex(ValueError, option):
+                    mapping.mapping_url(repo, path, ref)
+
+    def test_local_file_source_records_hash(self) -> None:
+        import tempfile
+        with tempfile.TemporaryDirectory() as temporary:
+            local = Path(temporary) / "m.xlsx"
+            local.write_bytes(make_xlsx(rows([PKG, "MAIN.fd", "Debug", "", "1P0"])))
+            components, loaded = mapping.load_mapping(
+                mapping.MappingSource("local", str(local)), token=None
+            )
+        self.assertEqual(len(components), 1)
+        self.assertEqual(loaded.kind, "local")
+        self.assertEqual(_Handler.seen, [])
 
 
 if __name__ == "__main__":

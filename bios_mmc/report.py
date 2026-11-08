@@ -13,6 +13,11 @@ Schema (version 1)::
       "bios_id": "0040D90" | null,
       "mmc_version": "0.1027.0" | null,
       "upload_target": "https://<host>/artifactory/<repo>" | null,
+      "mapping": {                    # null when no BIOS was packaged in this run
+        "kind": "github" | "url" | "local", "location": API URL or path,
+        "repo", "path", "ref": str | null,           # set for kind "github"
+        "sha256", "component_packages", "file_rows"  # null until it was read
+      } | null,
       "bios": Artifact, "mmc": Artifact
     }
 
@@ -74,6 +79,7 @@ class RunReport:
     bios_id: str | None = None
     mmc_version: str | None = None
     upload_target: str | None = None
+    mapping: dict[str, object] | None = None
     bios: Artifact = field(default_factory=Artifact)
     mmc: Artifact = field(default_factory=Artifact)
 

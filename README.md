@@ -80,9 +80,11 @@ Useful options:
 |---|---|---|
 | `--bios 0040D79` | newest | Package a specific BIOS ID (`0040D79`, `0040.D79` or `0040.D.79`) |
 | `--output-dir` | `C:\LocalPath\Bios` (Windows), `~/LocalPath/Bios` (Linux) | Final archives |
-| `--mapping-ref` | `release/ap.post-silicon` | IFWI repository branch/tag/commit for the mapping. The repository's `main` branch does not contain it. |
-| `--mapping-url` | GitHub contents API | Full override URL |
-| `--mapping-xlsx` | — | Use a local `biosid_oak_ap.xlsx`; no GitHub access |
+| `--mapping-repo` | `intel-innersource/firmware.boot.uefi.iafw.devops.build.ifwi` | GitHub repository of the mapping |
+| `--mapping-path` | `oak_release/BuildScripts/CommonLib/BIOS_Repackaging/biosid_oak_ap.xlsx` | Mapping file path in that repository (for example `.../biosid_oak_sp.xlsx`) |
+| `--mapping-ref` | `release/ap.post-silicon` | Branch, tag or commit. The repository's `main` branch does not contain the mapping. |
+| `--mapping-url` | — | Full GitHub contents API URL; overrides the three options above |
+| `--mapping-xlsx` | — | Use a local xlsx; no GitHub access. Cannot be combined with `--mapping-url` |
 | `--jobs` | CPU count | Parallel component downloads/extractions |
 | `--download-retry` | 3 | Attempts per component download + extraction |
 | `--bios-branch` | `main` | BIOS branch folder (`main`, `dmr_ap1_b0_po_platform`, `oks_milestone_rel`, ...) |
@@ -271,6 +273,7 @@ code 2 before running).
 | `status` / `exit_code` | `success` / `0`, or `failed` / `1`; `error` holds the first line of the failure |
 | `bios_id`, `mmc_version` | `null` until known (for example, no MMC version on a `--dry-run` or before BIOS exists) |
 | `upload_target` | Set when an upload or target check is involved; otherwise `null` |
+| `mapping` | The mapping actually used when BIOS was packaged: `kind` (`github` / `url` / `local`), `location`, `repo`, `path`, `ref`, `sha256`, `component_packages`, `file_rows`. `null` when no BIOS was packaged (for example, `mmc`, `upload`, or a BIOS reused from the target) |
 | `packaging` | `packaged`, `skipped_published` (already in the target, not rebuilt), `provided` (given with `--bios-archive`/`--mmc-archive`), `planned` (`--dry-run`), `not_run` |
 | `upload` | `uploaded`, `already_present` (identical file found by the upload preflight), `skipped_published`, `preview` (`--dry-run`), `not_requested`, `failed`, `not_run` |
 | `skipped` | `true` when the archive was already published and was neither rebuilt nor uploaded |

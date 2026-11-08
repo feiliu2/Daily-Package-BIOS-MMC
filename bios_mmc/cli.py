@@ -24,7 +24,10 @@ from . import LOGGER
 from .artifactory import BiosBuild, HttpClient, parse_bios_id, select_build
 from .bios import package_bios
 from .fsutil import ensure_output_dir, find_seven_zip
-from .mapping import DEFAULT_MAPPING_REF, GITHUB_TOKEN_ENV, default_mapping_url, load_mapping
+from .mapping import (
+    DEFAULT_MAPPING_PATH, DEFAULT_MAPPING_REF, DEFAULT_MAPPING_REPO, GITHUB_TOKEN_ENV,
+    MappingSource, github_source, load_mapping,
+)
 from .mmc import package_mmc_fw, read_mmc_version
 from .report import RunReport
 from .upload import (
@@ -108,16 +111,6 @@ def add_bios_source(parser: argparse.ArgumentParser) -> None:
         "--bios", help="BIOS ID to package (e.g. 0040D79); default: newest build.",
     )
     group.add_argument(
-        "--mapping-ref", default=DEFAULT_MAPPING_REF,
-        help=f"IFWI repository branch/tag/commit for biosid_oak_ap.xlsx "
-             f"(default: {DEFAULT_MAPPING_REF}).",
-    )
-    group.add_argument("--mapping-url", help="Full GitHub contents API URL override.")
-    group.add_argument(
-        "--mapping-xlsx", type=Path,
-        help="Use a local biosid_oak_ap.xlsx instead of downloading it.",
-    )
-    group.add_argument(
         "--download-retry", type=int, default=DEFAULT_DOWNLOAD_RETRY,
         help="Attempts per component package download/extraction.",
     )
@@ -125,6 +118,43 @@ def add_bios_source(parser: argparse.ArgumentParser) -> None:
         "--jobs", type=int, default=os.cpu_count() or 1,
         help="Parallel component downloads (default: CPU count).",
     )
+
+
+def add_mapping_source(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_argument_group(
+        "BIOS component mapping (biosid xlsx)",
+        "Fetched from GitHub as <repo>/<path> at <ref> with $IFWI_GITHUB_TOKEN, unless "
+        "--mapping-url or --mapping-xlsx is given.",
+    )
+    group.add_argument(
+        "--mapping-repo", default=DEFAULT_MAPPING_REPO,
+        help=f"GitHub repository <owner>/<name> (default: {DEFAULT_MAPPING_REPO}).",
+    )
+    group.add_argument(
+        "--mapping-path", default=DEFAULT_MAPPING_PATH,
+        help=f"File path in the repository (default: {DEFAULT_MAPPING_PATH}).",
+    )
+    group.add_argument(
+        "--mapping-ref", default=DEFAULT_MAPPING_REF,
+        help=f"Branch, tag or commit (default: {DEFAULT_MAPPING_REF}).",
+    )
+    exclusive = group.add_mutually_exclusive_group()
+    exclusive.add_argument(
+        "--mapping-url",
+        help="Full GitHub contents API URL; overrides --mapping-repo/-path/-ref.",
+    )
+    exclusive.add_argument(
+        "--mapping-xlsx", type=Path,
+        help="Use a local xlsx file instead of downloading it (no GitHub access).",
+    )
+
+
+def mapping_source(args: argparse.Namespace) -> MappingSource:
+    if args.mapping_xlsx is not None:
+        return MappingSource("local", str(args.mapping_xlsx.resolve()))
+    if args.mapping_url:
+        return MappingSource("url", args.mapping_url)
+    return github_source(args.mapping_repo, args.mapping_path, args.mapping_ref)
 
 
 def add_mmc_source(parser: argparse.ArgumentParser) -> None:
@@ -177,6 +207,7 @@ def all_parser() -> argparse.ArgumentParser:
     )
     add_packaging(parser)
     add_bios_source(parser)
+    add_mapping_source(parser)
     add_mmc_source(parser)
     add_upload_flag(parser)
     add_upload_target(parser)
@@ -190,6 +221,7 @@ def bios_parser() -> argparse.ArgumentParser:
     )
     add_packaging(parser)
     add_bios_source(parser)
+    add_mapping_source(parser)
     add_common(parser)
     return parser
 
@@ -273,13 +305,14 @@ def select_build_step(args: argparse.Namespace, context: Context) -> tuple[BiosB
 
 def package_bios_step(
     args: argparse.Namespace, context: Context, build: BiosBuild, branch_url: str,
+    report: RunReport,
 ) -> Path:
-    components = load_mapping(
-        local_path=args.mapping_xlsx,
-        url=args.mapping_url or default_mapping_url(args.mapping_ref),
-        token=os.environ.get(GITHUB_TOKEN_ENV),
-        http=context.http,
+    source = mapping_source(args)
+    report.mapping = source.as_dict()
+    components, loaded = load_mapping(
+        source, token=os.environ.get(GITHUB_TOKEN_ENV), http=context.http,
     )
+    report.mapping = loaded.as_dict()
     return package_bios(
         build,
         build_url=f"{branch_url}{build.directory_name}/",
@@ -303,7 +336,7 @@ def record_bios(args: argparse.Namespace, report: RunReport, path: Path) -> None
 def bios_step(args: argparse.Namespace, context: Context, report: RunReport) -> Path:
     build, branch_url = select_build_step(args, context)
     report.bios_id = build.bios_id
-    path = package_bios_step(args, context, build, branch_url)
+    path = package_bios_step(args, context, build, branch_url, report)
     record_bios(args, report, path)
     return path
 
@@ -417,7 +450,7 @@ def run_all(args: argparse.Namespace, report: RunReport) -> int:
             bios_archive = remote.obtain(published, context.output_dir / build.package_name)
             report.bios.path = str(bios_archive.resolve())
         else:
-            bios_archive = package_bios_step(args, context, build, branch_url)
+            bios_archive = package_bios_step(args, context, build, branch_url, report)
             record_bios(args, report, bios_archive)
             if args.dry_run:
                 LOGGER.info(

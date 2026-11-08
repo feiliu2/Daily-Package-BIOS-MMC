@@ -133,7 +133,10 @@ class CliFixture(unittest.TestCase):
             "find_seven_zip": mock.patch.object(
                 cli, "find_seven_zip", return_value=Path("7z")
             ),
-            "load_mapping": mock.patch.object(cli, "load_mapping", return_value=["c"]),
+            "load_mapping": mock.patch.object(
+                cli, "load_mapping",
+                side_effect=lambda source, **kwargs: (["c"], source),
+            ),
             "package_bios": mock.patch.object(
                 cli, "package_bios", return_value=self.output / "0040.D79.7z"
             ),
@@ -177,9 +180,13 @@ class OrchestrationTests(CliFixture):
             cli.DEFAULT_BIOS_BASE_URL + "main/OAKSTRM.0.RPB.0040.D.79/",
         )
         self.assertEqual(bios_call.kwargs["retries"], cli.DEFAULT_DOWNLOAD_RETRY)
-        mapping_call = self.mocks["load_mapping"].call_args.kwargs
-        self.assertEqual(mapping_call["token"], "gh-token")
-        self.assertIn("ref=release%2Fap.post-silicon", mapping_call["url"])
+        call = self.mocks["load_mapping"].call_args
+        self.assertEqual(call.kwargs["token"], "gh-token")
+        source = call.args[0]
+        self.assertEqual((source.kind, source.repo, source.ref), (
+            "github", "intel-innersource/firmware.boot.uefi.iafw.devops.build.ifwi",
+            "release/ap.post-silicon"))
+        self.assertTrue(source.path.endswith("biosid_oak_ap.xlsx"))
         self.assertEqual(
             self.mocks["package_mmc_fw"].call_args.args[0], self.output / "0040.D79.7z"
         )
@@ -279,9 +286,31 @@ class OrchestrationTests(CliFixture):
         self.assertEqual(self.mocks["package_bios"].call_args.args[0].revision, "78")
         self.assertEqual(self.mocks["package_bios"].call_args.kwargs["jobs"], 3)
         self.assertEqual(self.mocks["package_bios"].call_args.kwargs["retries"], 5)
-        mapping_call = self.mocks["load_mapping"].call_args.kwargs
-        self.assertEqual(mapping_call["local_path"], xlsx)
-        self.assertIn("ref=dev", mapping_call["url"])
+        source = self.mocks["load_mapping"].call_args.args[0]
+        self.assertEqual((source.kind, source.location), ("local", str(xlsx.resolve())))
+
+    def test_mapping_repo_path_and_ref_are_combined(self) -> None:
+        self.assertEqual(cli.main([
+            *self.common, "--mapping-repo", "org/other", "--mapping-path",
+            "oak_release/x/biosid_oak_sp.xlsx", "--mapping-ref", "dev",
+        ]), 0)
+        source = self.mocks["load_mapping"].call_args.args[0]
+        self.assertEqual(source.location, (
+            "https://api.github.com/repos/org/other/contents/"
+            "oak_release/x/biosid_oak_sp.xlsx?ref=dev"))
+
+    def test_mapping_url_overrides_and_conflicts_with_local_file(self) -> None:
+        self.assertEqual(cli.main([*self.common, "--mapping-url", "https://m.test/x"]), 0)
+        source = self.mocks["load_mapping"].call_args.args[0]
+        self.assertEqual((source.kind, source.location), ("url", "https://m.test/x"))
+        with self.assertRaises(SystemExit), mock.patch("sys.stderr"):
+            cli.main([*self.common, "--mapping-url", "u", "--mapping-xlsx", "f.xlsx"])
+
+    def test_invalid_mapping_repo_fails_before_packaging(self) -> None:
+        with self.assertLogs("bios_packager", level="ERROR") as logged:
+            self.assertEqual(cli.main([*self.common, "--mapping-repo", "bad"]), 1)
+        self.assertIn("--mapping-repo", "\n".join(logged.output))
+        self.mocks["package_bios"].assert_not_called()
 
     def test_upload_flag_uploads_exact_pair_after_packaging(self) -> None:
         self.assertEqual(cli.main([*self.common, "--upload"]), 0)
@@ -337,6 +366,8 @@ class OrchestrationTests(CliFixture):
         for arguments in (
             ["bios", "--upload"], ["bios", "--bios-archive", "x.7z"],
             ["mmc", "--bios-archive", "x.7z", "--mapping-ref", "dev"],
+            ["mmc", "--bios-archive", "x.7z", "--mapping-repo", "a/b"],
+            ["upload", "--mapping-path", "x.xlsx"],
             ["--bios-archive", "x.7z"],
             ["bios", "--upload-url", "https://x/artifactory/R"],
             ["mmc", "--bios-archive", "x.7z", "--bios-branch", "main"],
@@ -354,12 +385,13 @@ class OrchestrationTests(CliFixture):
             ("package_mmc_fw", "MMC source missing"),
         ):
             with self.subTest(target=target):
+                original = self.mocks[target].side_effect
                 self.mocks[target].side_effect = ValueError(message)
                 with self.assertLogs("bios_packager", level="ERROR") as logged:
                     self.assertEqual(cli.main([*self.common, "--upload"]), 1)
                 self.assertIn(message, "\n".join(logged.output))
                 self.mocks["upload_archives"].assert_not_called()
-                self.mocks[target].side_effect = None
+                self.mocks[target].side_effect = original
 
     def test_upload_failure_is_distinct_from_packaging_failure(self) -> None:
         self.mocks["upload_archives"].side_effect = RuntimeError("verification failed")
