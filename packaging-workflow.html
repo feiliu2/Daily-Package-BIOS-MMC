@@ -105,6 +105,7 @@
     .source-grid, .workflow-grid, .command-grid, .rules-grid {
       display: grid; grid-template-columns: 1fr 1fr; gap: 20px;
     }
+    .source-grid { grid-template-columns: repeat(3, 1fr); }
     .source-card {
       padding: 19px 22px; border: 1px solid var(--line);
       border-top: 3px solid var(--blue); border-radius: 11px; background: white;
@@ -252,7 +253,7 @@
       <nav class="nav" aria-label="页面导航">
         <a href="#workflow">打包流程</a>
         <a href="#commands">运行命令</a>
-        <a href="#upload">确认后上传</a>
+        <a href="#upload">上传</a>
         <a href="#safety">安全与失败处理</a>
         <button class="print-button" type="button" onclick="window.print()">打印 / 保存 PDF</button>
       </nav>
@@ -261,38 +262,42 @@
     <main>
       <section class="hero" aria-labelledby="page-title">
         <div>
-          <p class="eyebrow">DAILY BUILD / WINDOWS AUTOMATION</p>
+          <p class="eyebrow">DAILY BUILD / WINDOWS + LINUX</p>
           <h1 id="page-title">每日 BIOS 打包<br><span>与匹配 MMC 固件</span></h1>
-          <p class="hero-description">从 Artifactory 获取最新 BIOS，使用原始命令完成打包，再从 BIOS 中读取 MMC 版本，生成对应固件包。两份本地产物校验成功后，先询问是否上传，经确认才直传到各自的 Artifactory 目录。</p>
+          <p class="hero-description">从 Artifactory 获取最新 BIOS，按 IFWI 仓库中的 <code>biosid_oak_ap.xlsx</code> 映射，用本仓库的 Python 代码直接重组 BIOS ID 包。随后从 BIOS 中读取 MMC 版本，生成对应的固件包。加上 <code>--upload</code> 后，用环境变量中的 Token 上传并校验两个包。</p>
           <div class="chips">
-            <span class="chip">默认 15:00 · 本机时间</span>
+            <span class="chip">Windows / Linux 同一套代码</span>
+            <span class="chip">不依赖 OakStreamAPIfwi 源码</span>
             <span class="chip">MMC 跟随 BIOS 版本</span>
-            <span class="chip">验证后发布与清理</span>
-            <span class="chip">上传前必须确认</span>
+            <span class="chip">上传需显式 --upload</span>
           </div>
         </div>
         <aside class="deliverables" aria-label="最终产物示例">
           <p class="eyebrow">FINAL DELIVERABLES</p>
-          <pre><code>C:\LocalPath\Bios\
+          <pre><code>C:\LocalPath\Bios\    (Linux: ~/LocalPath/Bios/)
 ├── 0040.D79.7z
 └── MMCFW_0.1022.0.7z</code></pre>
-          <p class="hero-status">BIOS + 匹配的 MMC，只保留最新一组</p>
-          <p class="footnote">以上是已验证的样例。实际 BIOS ID 和 MMC 版本由每次运行自动确定，不写死为 D79 或 0.1022.0。</p>
+          <p class="hero-status">BIOS + 匹配的 MMC；输出目录中的其他文件不受影响</p>
+          <p class="footnote">实际的 BIOS ID 和 MMC 版本由每次运行自动确定。</p>
         </aside>
       </section>
 
-      <aside class="notice"><strong>调度说明：</strong>需先注册 Windows 计划任务，才会按默认每天 15:00 触发。本页是离线流程说明，不查询实时任务状态，也不会自动执行任何打包命令。</aside>
+      <aside class="notice"><strong>说明：</strong>本页是离线流程说明，不会执行任何命令。定时调度不在本工具范围内（Windows 计划任务或 Linux cron / systemd timer 均可调用同一命令）。</aside>
 
       <section aria-labelledby="sources-title">
         <div class="section-heading">
-          <h2 id="sources-title">两个来源，一条版本链</h2>
-          <p>最新 BIOS &rarr; BIOS 内的 MMC 版本 &rarr; 精确匹配的 MMC 构建</p>
+          <h2 id="sources-title">三个来源，一条版本链</h2>
+          <p>最新 BIOS &rarr; 组件映射 &rarr; BIOS 内的 MMC 版本 &rarr; 精确匹配的 MMC 构建</p>
         </div>
         <div class="source-grid">
           <article class="source-card">
             <h3>BIOS · 查询最新 Build ID</h3>
             <a class="source-url" href="https://af01p-or.devtools.intel.com/artifactory/server-bios-staging-local/Daily/OakStreamRp/main/" target="_blank" rel="noopener noreferrer">https://af01p-or.devtools.intel.com/artifactory/server-bios-staging-local/Daily/OakStreamRp/main/</a>
-            <p>识别 <code>OAKSTRM.0.RPB.&lt;release&gt;.D.&lt;revision&gt;/</code>，按 release 和 revision 的数值大小选择最新版本。</p>
+            <p>识别 <code>OAKSTRM.0.RPB.&lt;release&gt;.D.&lt;revision&gt;/</code>，按 release 和 revision 的数值大小选择最新版本；也可用 <code>--bios 0040D79</code> 指定版本。</p>
+          </article>
+          <article class="source-card">
+            <h3>映射 · biosid_oak_ap.xlsx</h3>
+            <p>每次运行都从 GitHub 仓库 <code>intel-innersource/firmware.boot.uefi.iafw.devops.build.ifwi</code> 的 <code>oak_release/BuildScripts/CommonLib/BIOS_Repackaging/</code> 拉取，默认 <code>release/ap.post-silicon</code> 分支（该仓库的 <code>main</code> 分支里没有这个文件），需要设置 <code>IFWI_GITHUB_TOKEN</code>（FIV Ubuntu 镜像 v1.1.3 起已内置）。拉取失败直接报错，不回退到旧缓存。</p>
           </article>
           <article class="source-card mmc">
             <h3>MMC · 查询 BIOS 指定版本</h3>
@@ -307,45 +312,40 @@
           <h2 id="workflow-title">端到端执行流程</h2>
           <p>先完成 BIOS 阶段，再进入 MMC 阶段</p>
         </div>
-        <p class="flow-note"><strong>正常入口：</strong>计划任务或手动执行完整流程。<strong>补打 MMC：</strong>使用 <code>--bios-archive</code>，直接从第 <a href="#mmc-version">05 步</a>开始，不重新打包 BIOS，也不清空输出目录。</p>
+        <p class="flow-note"><strong>正常入口：</strong>手动或由调度器执行完整流程。<strong>单独执行某一步：</strong><code>main.py bios</code> 只打包 BIOSID，<code>main.py mmc --bios-archive</code> 只补打 MMC，<code>main.py upload</code> 只上传。补打 MMC 时直接从第 <a href="#mmc-version">05 步</a>开始，不读取映射，也不重新打包 BIOS。</p>
         <div class="workflow-grid">
           <article class="phase" aria-labelledby="bios-phase-title">
             <div class="phase-heading">
               <span class="phase-icon" aria-hidden="true">A</span>
-              <div><h3 id="bios-phase-title">BIOS 打包</h3><p>保留原始命令、配置文件和工作目录</p></div>
+              <div><h3 id="bios-phase-title">BIOS 打包</h3><p>原 restructure_new.py 的逻辑，用本仓库代码重新实现</p></div>
             </div>
             <ol class="steps">
               <li class="step">
-                <div class="step-heading"><span class="step-number" aria-hidden="true">01</span><h3>到点触发</h3></div>
-                <p>Windows 计划任务启动 <code>package_latest_bios.py</code>，默认本机时间每天 <strong>15:00</strong>，使用注册时固定的 Python 可执行文件。</p>
-                <span class="tag">OakStream-BIOS-Daily-Package</span>
+                <div class="step-heading"><span class="step-number" aria-hidden="true">01</span><h3>读取组件映射</h3></div>
+                <p>解析 xlsx 的 <code>config</code> sheet：<code>Original Package</code> / <code>Original Binary</code> / <code>Original Folder</code> / <code>Package file</code>，按包和文件夹分组。只用 Python 标准库解析，不需要 pandas 或 openpyxl。日志记录映射来源和 SHA-256。</p>
+                <span class="tag">当前映射：10 个组件包，553 行</span>
               </li>
               <li class="step">
-                <div class="step-heading"><span class="step-number" aria-hidden="true">02</span><h3>发现最新 BIOS</h3></div>
-                <p>读取 BIOS Artifactory 索引，按版本号数值比较，不依赖网页顺序、字符串排序或目录修改时间。</p>
+                <div class="step-heading"><span class="step-number" aria-hidden="true">02</span><h3>发现 BIOS 与组件包</h3></div>
+                <p>在构建目录中找到每个 <code>Original Folder</code>（优先精确同名），再按索引时间取匹配 <code>Original Package</code> 的最新文件。</p>
                 <pre><code>OAKSTRM.0.RPB.0040.D.79/
         ↓
 BIOS ID: 0040D79
 Archive: 0040.D79.7z</code></pre>
               </li>
               <li class="step">
-                <div class="step-heading"><span class="step-number" aria-hidden="true">03</span><h3>原位置执行原命令</h3></div>
-                <p>工作目录自动取自 <code>package_latest_bios.py</code> 所在文件夹，应与原打包脚本同目录，不依赖启动时的当前目录。以下路径仅为示例：</p>
-                <pre><code>C:\OKS\OakStreamAPIfwi\Ifwi\oak_release\BuildScripts\CommonLib\BIOS_Repackaging</code></pre>
-                <pre><code>python restructure_new.py --bios=0040D79 --package_fdr_file=0040.D79.7z --file_path=C:\LocalPath\Bios --config_ini=config_oak_ap.ini</code></pre>
+                <div class="step-heading"><span class="step-number" aria-hidden="true">03</span><h3>并行下载解压，按序复制</h3></div>
                 <ul>
-                  <li>原 INI 只读，不生成临时 INI，不改写工作空间。</li>
-                  <li>原脚本在 <code>C:\ATF</code> 下载和处理 BIOS。</li>
-                  <li>压缩包直接写入 <code>C:\LocalPath\Bios</code>。</li>
+                  <li>下载和 7-Zip 解压并行进行（<code>--jobs</code>）。包被截断或损坏时自动重试（<code>--download-retry</code>，默认 3 次）。包内有 <code>IFWIStitch20.bin</code> 时再解开一层。</li>
+                  <li>复制按表格顺序逐个组件进行。路径统一转成 <code>\</code> 分隔后匹配，所以原有正则在 Linux 上结果相同。</li>
+                  <li><code>Fv*Path.dsc</code> 按原脚本方式拼接，与原 Windows 输出逐字节一致；<code>BinaryFvSpr.fdf</code> 中的 S3M 路径会被改写。</li>
                 </ul>
-                <p class="warning"><strong>最新一组模式：</strong>原 BIOS 脚本会清空输出目录，再写入新包。旧 BIOS、旧 MMC 和其他文件不会保留；同一 BIOS ID 也会重新打包。</p>
               </li>
               <li class="step">
-                <div class="step-heading"><span class="step-number" aria-hidden="true">04</span><h3>验证 BIOS，再清空缓存</h3></div>
-                <p>子进程结束后，将原脚本最终 summary 同步显示到控制台和每日总日志：组件 / 构建包总数、已打包数、未打包数、未打包清单和原始耗时。这里统计的是源组件包，不是压缩包内的文件数量。</p>
-                <p>原命令成功退出后，确认压缩包存在且非空，并执行完整 <code>7z t</code> 校验。未打包数量非零时显示警告；报告缺失或不完整时明确提示，不把未知数量当成零。</p>
-                <p><strong>仅验证成功后</strong>清空 <code>C:\ATF</code> 内的文件和子目录，保留 <code>C:\ATF</code> 目录本身。随后才进入 MMC 阶段。</p>
-                <span class="tag">BIOS 验证失败 &rarr; 不执行最终缓存清理</span>
+                <div class="step-heading"><span class="step-number" aria-hidden="true">04</span><h3>汇总、压缩、校验、发布</h3></div>
+                <p>显示组件包总数、已打包和未打包数量，并列出未打包的组件及原因。和原脚本一样，缺少文件的组件不会阻止整体打包。</p>
+                <p>暂存目录建在输出目录下的 <code>bios-*</code> 中。压缩后先执行完整的 <code>7z t</code>，再原子替换同名包，最后删除暂存目录。<strong>不再使用 <code>C:\ATF</code>，也不再清空输出目录。</strong></p>
+                <span class="tag">所有组件都失败 &rarr; 不发布，保留旧包</span>
               </li>
             </ol>
           </article>
@@ -358,144 +358,110 @@ Archive: 0040.D79.7z</code></pre>
             <ol class="steps" start="5">
               <li class="step" id="mmc-version">
                 <div class="step-heading"><span class="step-number" aria-hidden="true">05</span><h3>从 BIOS 读取 MMC 版本</h3></div>
-                <p>读取所有 <code>Trunk_*\dsc\FvRawDefPath.dsc</code>，检查 <code>DEFINE MMC1</code> 和 <code>DEFINE MMC2</code> 指向的 <code>mmc_pkg_&lt;version&gt;_...</code>。</p>
-                <p>必须得到唯一、一致的版本；缺失或冲突直接失败。此版本来自构建 / 拼接配置，并非独立解码 ROM 内部版本字段。</p>
-                <span class="tag">D79 样例：40 处引用均为 0.1022.0</span>
+                <p>读取所有 <code>Trunk_*/dsc/FvRawDefPath.dsc</code>，检查 <code>DEFINE MMC1</code> 和 <code>DEFINE MMC2</code> 指向的 <code>mmc_pkg_&lt;version&gt;_...</code>。</p>
+                <p>必须得到唯一且一致的版本，缺失或冲突时直接失败。</p>
               </li>
               <li class="step">
                 <div class="step-heading"><span class="step-number" aria-hidden="true">06</span><h3>定位精确匹配的构建</h3></div>
-                <p>根据 BIOS 中的版本访问指定 Linux 构建目录：</p>
                 <pre><code>MMC_FW.DMR_AP.0.1022.0/
 └── DMR_ZCODE_DebugSigned_linux/
     └── *_BuildPkg.7z</code></pre>
-                <p>目录中必须恰好有一个 <code>_BuildPkg.7z</code>。不回退到旧包，也不会因为存在 <code>0.1024.0</code> 就改用该版本。</p>
+                <p>目录中必须恰好有一个 <code>_BuildPkg.7z</code>，不回退到其他版本。</p>
               </li>
               <li class="step">
                 <div class="step-heading"><span class="step-number" aria-hidden="true">07</span><h3>下载并只提取 binaries</h3></div>
-                <p>下载匹配的 BuildPkg，以独立的原生 7-Zip 命令只提取 <code>binaries</code> 子树，保留其中全部文件及许可证。</p>
                 <ul>
-                  <li>不提取其他源码、符号和构建目录。</li>
+                  <li>只提取 <code>binaries</code> 子树，包括其中的许可证文件。</li>
                   <li>不混入索引目录里的散装 <code>.bin</code>。</li>
-                  <li>拒绝不安全路径和 binaries 内的链接。</li>
+                  <li>拒绝不安全路径，以及 binaries 内的链接。</li>
                 </ul>
-                <span class="tag">不复用原 BIOS 解压辅助函数</span>
               </li>
               <li class="step">
-                <div class="step-heading"><span class="step-number" aria-hidden="true">08</span><h3>重打包并逐项验证</h3></div>
-                <p>生成 <code>MMCFW_&lt;version&gt;.7z</code>，内部根目录与包名一致：</p>
-                <pre><code>MMCFW_0.1022.0\
-└── binaries\
-    ├── LICENSE-3RD-PARTY.txt
-    ├── LICENSE-Intel-Agreement.txt
-    ├── mmc_pkg_0.1022.0_...bin
-    └── ...</code></pre>
-                <p>检查源二进制版本，再完整执行 <code>7z t</code>，确认成品的文件路径、大小、CRC 与源 binaries 一致，且没有其他目录内容。</p>
-              </li>
-              <li class="step">
-                <div class="step-heading"><span class="step-number" aria-hidden="true">09</span><h3>发布成品，清理临时文件</h3></div>
-                <p>MMC 暂存在输出目录下唯一的 <code>mmc-fw-*</code> 工作目录。新包验证通过后，在同一磁盘卷内原子替换最终同名 MMC 压缩包。</p>
-                <p>无论 MMC 成功或失败，只清理本次拥有的暂存目录，不清扫其他任务目录，不修改 BIOS 压缩包。</p>
-                <span class="tag">最终保留 BIOS + 对应 MMC 两个压缩包</span>
+                <div class="step-heading"><span class="step-number" aria-hidden="true">08</span><h3>重打包、逐项验证、发布</h3></div>
+                <pre><code>MMCFW_0.1022.0/
+└── binaries/
+    ├── LICENSE-*.txt
+    └── mmc_pkg_0.1022.0_...bin</code></pre>
+                <p>完整执行 <code>7z t</code>，确认路径、大小和 CRC 都与源 binaries 一致后，原子替换同名包，然后清理 <code>mmc-fw-*</code> 暂存目录。BIOS 包不会被改动。</p>
               </li>
             </ol>
           </article>
         </div>
         <aside class="result" aria-labelledby="verified-title">
-          <h3 id="verified-title">已验证样例 · 2026-11-03</h3>
-          <p><strong>0040.D79.7z &rarr; MMC 0.1022.0。</strong>实际从 Artifactory 下载并生成新 MMC 包，与 Downloads 参考包逐文件比较；参考包仅用于核对，不是打包来源。</p>
+          <h3 id="verified-title">对照验证 · 2026-11-08</h3>
+          <p><strong>0037.D18.7z：</strong>用新实现重新打包，与原 <code>restructure_new.py</code> 生成的包逐项对比。</p>
           <div class="proof-grid">
-            <div class="proof"><strong>17 / 17</strong><span>文件路径、大小、SHA-256 全部一致</span></div>
-            <div class="proof"><strong>53</strong><span>BIOS 与 MMC 测试全部通过</span></div>
-            <div class="proof"><strong>未改动</strong><span>BIOS 的 SHA-256 保持不变</span></div>
-            <div class="proof"><strong>已清理</strong><span>C:\ATF 为空，MMC 暂存已删除</span></div>
+            <div class="proof"><strong>2824 / 2824</strong><span>路径、大小、CRC 全部一致</span></div>
+            <div class="proof"><strong>10 / 10</strong><span>组件包全部打包</span></div>
+            <div class="proof"><strong>Win + Linux</strong><span>测试套件在两个平台均通过</span></div>
+            <div class="proof"><strong>已清理</strong><span>暂存目录全部删除</span></div>
           </div>
-          <p>压缩算法参数和时间戳可能导致压缩包大小 / 整包哈希不同，不代表内部文件内容不同。日常自动验证使用完整 7-Zip 校验及源文件清单；SHA-256 逐文件比较是此次参考包实测。</p>
+          <p>整包大小可能因压缩参数和 7-Zip 版本不同而不同，内部文件内容一致。</p>
         </aside>
       </section>
 
       <section id="commands" aria-labelledby="commands-title">
         <div class="section-heading">
-          <h2 id="commands-title">运行与调度命令</h2>
-          <p>在部署后的 BIOS_Repackaging 目录执行；页面按钮仅用于打印</p>
+          <h2 id="commands-title">运行命令</h2>
+          <p>Linux 用 python3 和 export；Windows 用 python 和 $env:</p>
         </div>
         <div class="command-grid">
           <article class="command-card wide">
-            <h3>前置依赖：准备本地 OakStreamAPIfwi 源码</h3>
-            <p>本仓库不是独立的 BIOS 打包工具。需先安装并配置可访问该项目及源码仓库的 <code>edkrepo</code>，选择父目录后一次性下载源码；以下 <code>C:\OKS</code> 仅为示例，并非固定源码路径：</p>
-            <pre><code>New-Item -ItemType Directory -Force -Path 'C:\OKS' | Out-Null
-Set-Location 'C:\OKS'
-edkrepo clone OakStreamAPIfwi OakStreamAPIfwi</code></pre>
-            <p>命令会创建 <code>C:\OKS\OakStreamAPIfwi</code>。已有该源码工作区时直接复用，跳过 clone，不覆盖或删除现有源码。每日任务不会自动 clone。</p>
-            <p>将 <code>package_latest_bios.py</code>、<code>Register-BiosPackagingTask.ps1</code> 与 <code>Upload-BiosMmc.ps1</code> 三个自动化文件部署到原 <code>BIOS_Repackaging</code> 目录，与 <code>restructure_new.py</code>、<code>Config</code> 和 <code>7-Zip</code> 放在一起；若源码分支已包含这三个文件，无需再复制。默认按自动化脚本所在目录定位原工具。上传还需要 Windows PowerShell 5.1 与可用的 <code>curl.exe</code>。</p>
-            <details>
-              <summary>自动化脚本与原工具不同目录时</summary>
-              <pre><code>python .\package_latest_bios.py --repackaging-dir "C:\OKS\OakStreamAPIfwi\Ifwi\oak_release\BuildScripts\CommonLib\BIOS_Repackaging" --dry-run</code></pre>
-              <p>将路径换成实际原工具目录；去掉 <code>--dry-run</code> 后实际打包。该覆盖也适用于只打包 MMC，但仅影响当次运行，不会自动保存到计划任务。默认不搜索或回退到其他源码工作区。</p>
-            </details>
+            <h3>前置条件</h3>
+            <ul>
+              <li>Python 3.10 或更新版本（只用标准库）。</li>
+              <li>原生 7-Zip：Windows 安装 7-Zip 即可；Linux 安装 <code>7zip</code> 或 <code>p7zip-full</code>；也可以用 <code>--seven-zip</code> 指定路径。</li>
+              <li><code>IFWI_GITHUB_TOKEN</code>：需要能读取 IFWI 仓库，用于拉取映射表。使用 <code>--mapping-xlsx</code> 指定本地文件时可以不设置。</li>
+              <li>能访问 Intel 网络或 VPN；代理遵循 <code>HTTP(S)_PROXY</code> / <code>NO_PROXY</code> 环境变量。</li>
+            </ul>
           </article>
           <article class="command-card">
             <h3>完整流程：BIOS + 匹配 MMC</h3>
-            <span class="command-label">预览</span>
-            <pre><code>python .\package_latest_bios.py --dry-run</code></pre>
-            <p>查询最新 BIOS 并显示计划命令。不执行原打包器，不猜测尚未生成的新 BIOS 的 MMC 版本。</p>
+            <span class="command-label">预览（解析映射和所有组件 URL，不下载固件）</span>
+            <pre><code>export IFWI_GITHUB_TOKEN=...
+python3 main.py --dry-run</code></pre>
             <span class="command-label">实际执行</span>
-            <pre><code>python .\package_latest_bios.py</code></pre>
-            <p>两份压缩包都成功后，弹窗确认是否上传。点“否”保留本地产物；点“是”才输入一次 Token 并上传。</p>
-            <span class="command-label">仅打包，不显示上传确认框</span>
-            <pre><code>python .\package_latest_bios.py --no-upload</code></pre>
+            <pre><code>python3 main.py</code></pre>
+            <span class="command-label">指定版本、映射分支，打包后上传</span>
+            <pre><code>python3 main.py --bios 0040D79 --mapping-ref release/ap.post-silicon --upload</code></pre>
           </article>
           <article class="command-card">
             <h3>只补打 MMC：保留现有 BIOS</h3>
             <span class="command-label">预览</span>
-            <pre><code>python .\package_latest_bios.py --bios-archive C:\LocalPath\Bios\0040.D79.7z --dry-run</code></pre>
-            <p>读取指定 BIOS 并查询匹配 MMC 目录，不下载固件、不解压到磁盘、不改动现有压缩包。</p>
+            <pre><code>python3 main.py mmc --bios-archive ~/LocalPath/Bios/0040.D79.7z --dry-run</code></pre>
             <span class="command-label">实际执行</span>
-            <pre><code>python .\package_latest_bios.py --bios-archive C:\LocalPath\Bios\0040.D79.7z</code></pre>
-          </article>
-          <article class="command-card wide">
-            <h3>注册 Windows 每日计划任务</h3>
-            <p>从上述同目录部署位置注册。任务调用相邻的自动化脚本，原工具目录由该脚本自动定位；注册后再移动脚本时，需要更新原任务的启动路径。</p>
-            <div class="schedule-options">
-              <div><span class="command-label">先预览注册配置</span><pre><code>.\Register-BiosPackagingTask.ps1 -WhatIf</code></pre></div>
-              <div><span class="command-label">确认后注册，默认 15:00</span><pre><code>.\Register-BiosPackagingTask.ps1</code></pre></div>
-            </div>
-            <p>注册不会立即打包，也不会覆盖已存在的同名任务。可使用 <code>-At '15:30'</code> 修改时间，使用 <code>-PythonPath</code> 指定已有依赖的 Python。Python 需为 3.10 或更新版本。</p>
-            <details>
-              <summary>查看调度前提与重试策略</summary>
-              <p>电脑需开机，当前用户需保持登录，并连接 Intel 网络 / VPN。错过时间后会在条件满足时补跑；失败最多重试 3 次，间隔 15 分钟；忽略重叠的计划任务实例；总执行上限 4 小时。BIOS 子进程上限 3 小时，每个 7-Zip 步骤上限 30 分钟。上传不是无人值守操作：必须确认并输入 Token；等待确认也计入任务的 4 小时限制。上传错误触发原任务重试时会重新打包并再次询问，只重试传输时应单独运行上传脚本。</p>
-            </details>
+            <pre><code>python3 main.py mmc --bios-archive ~/LocalPath/Bios/0040.D79.7z</code></pre>
           </article>
         </div>
       </section>
 
       <section id="upload" aria-labelledby="upload-title">
         <div class="section-heading">
-          <h2 id="upload-title">本地打包完成 → 确认后上传</h2>
-          <p>独立脚本可重用；每日流程传入本次实际生成的两个文件，不重新猜测版本</p>
+          <h2 id="upload-title">上传（Token 来自环境变量）</h2>
+          <p>默认不上传；完整流程加 --upload，或单独使用 upload 子命令</p>
         </div>
         <div class="command-grid">
           <article class="command-card">
             <h3>只上传现有压缩包</h3>
-            <span class="command-label">预览：无弹窗、无 Token、无 HTTP 请求</span>
-            <pre><code>.\Upload-BiosMmc.ps1 -WhatIf</code></pre>
-            <span class="command-label">确认后直传</span>
-            <pre><code>.\Upload-BiosMmc.ps1</code></pre>
-            <p>默认读取 <code>C:\LocalPath\Bios</code>，必须恰好有一个 BIOS 包和一个 <code>MMCFW_版本.7z</code>。不重打包、不改名、不删除文件。独立上传仅按文件名选择，需自行选择匹配的一组。</p>
-            <details>
-              <summary>修改本地目录或显式选择两个文件</summary>
-              <pre><code>.\Upload-BiosMmc.ps1 -SourceDirectory 'D:\Firmware'
-.\Upload-BiosMmc.ps1 -BiosArchive 'C:\LocalPath\Bios\0040.D82.7z' -MmcArchive 'C:\LocalPath\Bios\MMCFW_0.1022.0.7z'</code></pre>
-              <p>显式路径必须成对提供。缺包、空包、多包或不符合命名规则时会报错，不自动选择最新文件。</p>
-            </details>
+            <span class="command-label">预览：不读 Token，不发出 HTTP 请求</span>
+            <pre><code>python3 main.py upload --dry-run</code></pre>
+            <span class="command-label">实际上传</span>
+            <pre><code>export IFWI_ARTIFACTORY_TOKEN=...
+python3 main.py upload
+python3 main.py upload --bios-archive ./0040.D82.7z --mmc-archive ./MMCFW_0.1022.0.7z</code></pre>
+            <p>不指定文件时，<code>--source-dir</code> 中必须恰好有一个 BIOS 包和一个 <code>MMCFW_版本.7z</code>，不会自动选择最新的文件。</p>
           </article>
           <article class="command-card">
-            <h3>一次确认、一次 Token、两个目标</h3>
-            <p>先显示文件与目标的 Yes / No / Cancel 确认框，默认 <strong>No</strong>。选 No、Cancel 或关闭窗口都不会请求 Token 或访问网络，不影响本地成功的打包。</p>
-            <p>同意后，在 Windows 凭据框的 <strong>Password</strong> 栏粘贴 Artifactory Access Token，用户名保持不变；取消凭据框也不会上传。</p>
+            <h3>预检、直传、校验</h3>
             <p>BIOS → <a href="https://af01p-sc.devtools.intel.com/ui/repos/tree/General/DEG-IFWI-LOCAL/FIV_Portal/IFWI_CI/BIOSID" target="_blank" rel="noopener noreferrer">DEG-IFWI-LOCAL / FIV_Portal / IFWI_CI / BIOSID</a></p>
             <p>MMC → <a href="https://af01p-sc.devtools.intel.com/ui/repos/tree/General/DEG-IFWI-LOCAL/FIV_Portal/IFWI_CI/MMC" target="_blank" rel="noopener noreferrer">DEG-IFWI-LOCAL / FIV_Portal / IFWI_CI / MMC</a></p>
-            <p>先预检两端文件，再用原生 <code>curl.exe</code> 经 HTTPS PUT 直传，保留文件名；核对远端路径、准确字节数和 SHA-256 后才报告成功。相同文件跳过，同名不同内容则停止，不覆盖。</p>
-            <p>Token 只留在本次进程内，通过 stdin 交给 curl，不放进命令行、文件、环境变量或日志。不要将 Token 发到聊天里。</p>
+            <ul>
+              <li>上传和下载共用同一个 <code>IFWI_ARTIFACTORY_TOKEN</code>（FIV Ubuntu 镜像中已内置）。上传时缺失或格式不对，在发出任何请求前就失败；下载时如果没有设置，就匿名访问。</li>
+              <li>先预检两个目标目录和同名文件：内容相同则跳过，同名但内容不同则停止，不会覆盖。</li>
+              <li>上传使用 HTTP PUT，附带 <code>X-Checksum-Sha256</code>；传输过程中本地文件如有变化，也判定为失败。</li>
+              <li>上传后核对远端路径、字节数和 SHA-256，一致才算成功。</li>
+            </ul>
+            <p>Token 不会出现在命令行和日志中。</p>
           </article>
         </div>
       </section>
@@ -503,31 +469,31 @@ edkrepo clone OakStreamAPIfwi OakStreamAPIfwi</code></pre>
       <section id="safety" aria-labelledby="safety-title">
         <div class="section-heading">
           <h2 id="safety-title">清理边界与失败分支</h2>
-          <p>错误写日志并返回非零退出码，不静默回退、不把失败当成功</p>
+          <p>出错时写日志并返回非零退出码，不静默回退，也不把失败当成功</p>
         </div>
         <div class="rules-grid">
-          <article class="rule warning">
-            <h3>输出目录与 C:\ATF 必须专用</h3>
-            <p>完整流程保留“最新一组”，不是历史归档。不要在这些目录保存其他数据，也不要同时手动运行另一份打包。预检查拒绝危险重叠、根目录、受保护路径及链接 / junction。</p>
+          <article class="rule safe">
+            <h3>输出目录：只替换目标包</h3>
+            <p>只替换本次生成的同名包，不删除输出目录中的其他文件。拒绝使用根目录、家目录、本仓库目录、链接或 junction 作为输出目录。</p>
           </article>
           <article class="rule warning">
-            <h3>BIOS 失败：保留现场</h3>
-            <p>原命令或 BIOS 归档校验失败时，不执行最后的 C:\ATF 清理，便于排查。原脚本在失败之前可能已替换工作空间或清空输出，不能保证旧包仍存在。</p>
+            <h3>BIOS：部分缺失只警告</h3>
+            <p>组件文件夹不存在、下载失败或文件缺失时，该组件记为未打包，其余组件照常打包，与原脚本行为一致。所有组件都失败时不发布，保留旧包。</p>
           </article>
           <article class="rule safe">
             <h3>MMC 失败：不破坏 BIOS</h3>
-            <p>版本缺失 / 冲突、源包缺失 / 多义、网络或解压 / 校验失败都会报告错误。只清理本次 MMC 暂存，保留 BIOS；新包校验通过前，不替换现存同名 MMC 成品。</p>
+            <p>版本缺失或冲突、源包缺失或不唯一、网络、解压或校验失败时都会报错。只清理本次的暂存目录；新包校验通过之前，不替换已有的同名 MMC 包。</p>
           </article>
           <article class="rule safe">
-            <h3>缓存清理：只重试可恢复锁定</h3>
-            <p>Windows 文件共享 / 锁定错误 32、33 最多重试 5 次，间隔 2 秒。持续锁定、其他权限问题或清理失败会明确报错，不跳过检查后宣告任务完成。</p>
+            <h3>暂存清理：只重试可恢复的锁定</h3>
+            <p>遇到 Windows 文件锁定（错误 32、33）时，最多重试 5 次，每次间隔 2 秒。其他权限问题直接报错。</p>
           </article>
           <article class="rule safe">
             <h3>上传失败：保留产物，单独重试</h3>
-            <p>打包失败或预览模式不进入上传确认。上传 / 校验失败会返回非零，保留本地文件；若 BIOS 已成功而 MMC 失败，不删除已验证的远端 BIOS。重新运行独立上传脚本会跳过相同文件，只补传缺失部分。每个上传限时 30 分钟，元数据请求限时 60 秒。</p>
+            <p>上传或校验失败时返回非零，保留本地文件。如果 BIOS 已成功而 MMC 失败，不删除远端已校验的 BIOS。用 <code>upload</code> 子命令重试时，相同的文件会自动跳过。</p>
           </article>
         </div>
-        <div class="logs"><strong>排查日志：</strong><code>logs\package-bios-YYYYMMDD.log</code> 记录 BIOS / MMC 的选择、执行与结果，并与控制台同步显示原 BIOS 最终 summary、组件包统计，以及集成上传的取消 / 跳过 / 成功 / 失败结果；<code>logs\restructure-*.log</code> 仍保留完整原始输出。日志位于自动化脚本旁边的 logs 目录，不随 C:\ATF 或固件输出清理。独立上传只向调用它的控制台输出，不保存 Token。</div>
+        <div class="logs"><strong>排查日志：</strong>控制台输出与脚本旁的 <code>logs/package-bios-YYYYMMDD.log</code> 内容相同。日志记录映射来源和 SHA-256、每个组件的 URL、打包和未打包的汇总、MMC 的选择，以及上传结果。</div>
       </section>
     </main>
 

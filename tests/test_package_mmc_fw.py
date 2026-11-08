@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import shutil
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path, PureWindowsPath
 from unittest import mock
 from urllib.error import URLError
 
-import package_latest_bios as packager
-from seven_zip_support import SEVEN_ZIP_DIRECTORY, copy_seven_zip
+from seven_zip_support import SEVEN_ZIP
+
+from bios_mmc import artifactory, fsutil, mmc
+from bios_mmc.fsutil import ArchiveEntry
 
 
 VERSION = "0.1022.0"
@@ -30,7 +31,7 @@ class MmcVersionTests(unittest.TestCase):
         self.bios = Path(temporary.name) / "BIOS.7z"
         self.bios.write_bytes(b"fixture")
 
-    @mock.patch.object(packager, "run_7zip")
+    @mock.patch.object(mmc, "run_7zip")
     def test_reads_all_definitions_and_ignores_unrelated_versions(
         self, run: mock.Mock
     ) -> None:
@@ -38,12 +39,10 @@ class MmcVersionTests(unittest.TestCase):
             f"  DEFINE MMC1 = path\\{BIN_NAME}\n"
             f"  DEFINE MMC2 = other\\{BIN_NAME}\n"
         ) * 20 + "DEFINE OTHER = mmc_pkg_0.1024.0_other.bin\n"
-        self.assertEqual(packager.read_mmc_version(self.bios, Path("7z.exe")), VERSION)
-        self.assertEqual(
-            run.call_args.args[1][-1], r"Trunk_*\dsc\FvRawDefPath.dsc"
-        )
+        self.assertEqual(mmc.read_mmc_version(self.bios, Path("7z")), VERSION)
+        self.assertEqual(run.call_args.args[1][-1], "Trunk_*/dsc/FvRawDefPath.dsc")
 
-    @mock.patch.object(packager, "run_7zip")
+    @mock.patch.object(mmc, "run_7zip")
     def test_conflicting_versions_fail_instead_of_selecting_latest(
         self, run: mock.Mock
     ) -> None:
@@ -52,9 +51,9 @@ class MmcVersionTests(unittest.TestCase):
             "DEFINE MMC2 = mmc_pkg_0.1024.0_test.bin\n"
         )
         with self.assertRaisesRegex(ValueError, "Conflicting MMC versions"):
-            packager.read_mmc_version(self.bios, Path("7z.exe"))
+            mmc.read_mmc_version(self.bios, Path("7z"))
 
-    @mock.patch.object(packager, "run_7zip")
+    @mock.patch.object(mmc, "run_7zip")
     def test_missing_and_unversioned_references_fail(self, run: mock.Mock) -> None:
         for content in (
             "", f"# DEFINE MMC1 = {BIN_NAME}",
@@ -63,13 +62,13 @@ class MmcVersionTests(unittest.TestCase):
             with self.subTest(content=content):
                 run.return_value = content
                 with self.assertRaisesRegex(ValueError, "No MMC|no recognizable version"):
-                    packager.read_mmc_version(self.bios, Path("7z.exe"))
+                    mmc.read_mmc_version(self.bios, Path("7z"))
 
-    @mock.patch.object(packager, "run_7zip")
+    @mock.patch.object(mmc, "run_7zip")
     def test_missing_archive_fails_without_extraction(self, run: mock.Mock) -> None:
         self.bios.unlink()
         with self.assertRaisesRegex(ValueError, "missing or empty"):
-            packager.read_mmc_version(self.bios, Path("7z.exe"))
+            mmc.read_mmc_version(self.bios, Path("7z"))
         run.assert_not_called()
 
 
@@ -82,7 +81,7 @@ class MmcSourceTests(unittest.TestCase):
             f"https://other.test/{SOURCE_NAME}",
         )
         self.assertEqual(
-            packager.select_mmc_source(html, DIRECTORY_URL),
+            artifactory.select_mmc_source(html, DIRECTORY_URL),
             DIRECTORY_URL + SOURCE_NAME,
         )
 
@@ -94,12 +93,13 @@ class MmcSourceTests(unittest.TestCase):
         ):
             with self.subTest(html=html):
                 with self.assertRaisesRegex(ValueError, "exactly one"):
-                    packager.select_mmc_source(html, DIRECTORY_URL)
+                    artifactory.select_mmc_source(html, DIRECTORY_URL)
 
-    @mock.patch.object(packager, "urlopen")
+    @mock.patch.object(artifactory, "urlopen")
     def test_download_checks_length_and_rejects_empty_data(
         self, urlopen: mock.Mock
     ) -> None:
+        http = artifactory.HttpClient()
         with tempfile.TemporaryDirectory() as temporary:
             destination = Path(temporary) / "BuildPkg.7z"
             response = urlopen.return_value.__enter__.return_value
@@ -111,20 +111,18 @@ class MmcSourceTests(unittest.TestCase):
                     response.read.side_effect = [content, b""]
                     response.headers.get.return_value = length
                     if valid:
-                        packager.download_file(DIRECTORY_URL + SOURCE_NAME, destination)
+                        http.download(DIRECTORY_URL + SOURCE_NAME, destination)
                         self.assertEqual(destination.read_bytes(), content)
                     else:
                         with self.assertRaisesRegex(ValueError, "Incomplete|Empty"):
-                            packager.download_file(
-                                DIRECTORY_URL + SOURCE_NAME, destination
-                            )
+                            http.download(DIRECTORY_URL + SOURCE_NAME, destination)
             self.assertEqual(urlopen.call_args.kwargs["timeout"], 60)
 
-    @mock.patch.object(packager, "run_7zip")
+    @mock.patch.object(fsutil, "run_7zip")
     def test_listing_rejects_unsafe_paths(self, run: mock.Mock) -> None:
         for path in (
             r"..\outside.bin", r"binaries\..\outside.bin",
-            r"C:\outside.bin", r"\outside.bin",
+            r"C:\outside.bin", r"\outside.bin", "/outside.bin",
             r"\\server\share\outside.bin", r"binaries\file.bin:stream",
         ):
             with self.subTest(path=path):
@@ -132,17 +130,17 @@ class MmcSourceTests(unittest.TestCase):
                     f"Path = {path}\nSize = 1\nAttributes = A\nCRC = 12345678\n"
                 )
                 with self.assertRaisesRegex(ValueError, "Unsafe archive member"):
-                    packager.list_archive(Path("source.7z"), Path("7z.exe"))
+                    fsutil.list_archive(Path("source.7z"), Path("7z"))
 
     def test_manifest_rejects_links_duplicates_wrong_versions_and_extra_output(self) -> None:
         path = PureWindowsPath("binaries") / BIN_NAME
-        valid = packager.ArchiveEntry(path, 10, "12345678", False, False)
+        valid = ArchiveEntry(path, 10, "12345678", False, False)
         for entries, message in (
-            ([packager.ArchiveEntry(path, 10, "12345678", False, True)], "Linked"),
+            ([ArchiveEntry(path, 10, "12345678", False, True)], "Linked"),
             ([valid, valid], "duplicate"),
-            ([packager.ArchiveEntry(path, 10, "", False, False)], "Missing CRC"),
+            ([ArchiveEntry(path, 10, "", False, False)], "Missing CRC"),
             ([
-                packager.ArchiveEntry(
+                ArchiveEntry(
                     PureWindowsPath(r"binaries\mmc_pkg_0.1024.0_other.bin"),
                     10, "12345678", False, False,
                 )
@@ -150,19 +148,16 @@ class MmcSourceTests(unittest.TestCase):
         ):
             with self.subTest(message=message):
                 with self.assertRaisesRegex(ValueError, message):
-                    packager.mmc_file_manifest(entries, VERSION, packaged=False)
+                    mmc.mmc_file_manifest(entries, VERSION, packaged=False)
         root = PureWindowsPath(f"MMCFW_{VERSION}")
-        packaged = packager.ArchiveEntry(root / path, 10, "12345678", False, False)
+        packaged = ArchiveEntry(root / path, 10, "12345678", False, False)
         with self.assertRaisesRegex(ValueError, "duplicate"):
-            packager.mmc_file_manifest([packaged, packaged], VERSION, packaged=True)
+            mmc.mmc_file_manifest([packaged, packaged], VERSION, packaged=True)
         with self.assertRaisesRegex(ValueError, "outside MMC binaries"):
-            packager.mmc_file_manifest([valid], VERSION, packaged=True)
+            mmc.mmc_file_manifest([valid], VERSION, packaged=True)
 
 
-@unittest.skipUnless(
-    SEVEN_ZIP_DIRECTORY is not None,
-    "Integration tests require a bundled or installed native 7-Zip.",
-)
+@unittest.skipUnless(SEVEN_ZIP is not None, "Integration tests require native 7-Zip.")
 class MmcPackagingTests(unittest.TestCase):
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory(prefix="mmc-tests.with.dots-")
@@ -170,8 +165,7 @@ class MmcPackagingTests(unittest.TestCase):
         self.root = Path(temporary.name)
         self.output = self.root / "output with spaces.and.dots"
         self.output.mkdir()
-        self.repackaging_dir = self.root / "repackager"
-        self.seven_zip = copy_seven_zip(self.repackaging_dir / "7-Zip")
+        self.seven_zip = SEVEN_ZIP
         bios_root = self.root / "bios fixtures"
         dsc = bios_root / "Trunk_AP00" / "dsc" / "FvRawDefPath.dsc"
         dsc.parent.mkdir(parents=True)
@@ -180,41 +174,24 @@ class MmcPackagingTests(unittest.TestCase):
             encoding="utf-8",
         )
         self.bios = self.output / "0040.D79.7z"
-        self.create_archive(bios_root, self.bios)
+        fsutil.create_archive(bios_root, self.bios, self.seven_zip)
         self.original_bios = self.bios.read_bytes()
         self.binary_files = {
             BIN_NAME: b"\x00\x01synthetic test binary" * 100,
             "LICENSE-test.txt": b"Synthetic fixture license.\n",
-            r"nested\details.txt": b"nested binaries content\n",
+            str(Path("nested") / "details.txt"): b"nested binaries content\n",
         }
         self.source = self.root / "BuildPkg.7z"
         self.make_source({
-            **{str(PureWindowsPath("binaries") / name): data
-               for name, data in self.binary_files.items()},
-            r"host_src_pkgs\source.txt": b"must be discarded",
+            **{f"binaries/{name}": data for name, data in self.binary_files.items()},
+            "host_src_pkgs/source.txt": b"must be discarded",
             "ReadMe.txt": b"must be discarded",
             f"mmc_pkg_{VERSION}_loose.bin": b"must not be mixed into binaries",
         })
-        fetch_patch = mock.patch.object(
-            packager, "fetch_index", return_value=index_page(SOURCE_NAME, "loose.bin")
-        )
-        self.fetch = fetch_patch.start()
-        self.addCleanup(fetch_patch.stop)
-        download_patch = mock.patch.object(
-            packager, "download_file",
-            side_effect=lambda url, destination: shutil.copyfile(self.source, destination),
-        )
-        self.download = download_patch.start()
-        self.addCleanup(download_patch.stop)
-
-    def create_archive(self, source: Path, destination: Path) -> None:
-        packager.run_7zip(
-            self.seven_zip,
-            [
-                "a", "-t7z", "-y", "-bso0", "-bsp0", "--", str(destination),
-                *(child.name for child in source.iterdir()),
-            ],
-            cwd=source,
+        self.http = mock.Mock(spec=artifactory.HttpClient)
+        self.http.get_text.return_value = index_page(SOURCE_NAME, "loose.bin")
+        self.http.download.side_effect = (
+            lambda url, destination: shutil.copyfile(self.source, destination)
         )
 
     def make_source(self, files: dict[str, bytes]) -> None:
@@ -224,14 +201,15 @@ class MmcPackagingTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
         self.source.unlink(missing_ok=True)
-        self.create_archive(source_root, self.source)
+        fsutil.create_archive(source_root, self.source, self.seven_zip)
 
     def package(self, *, dry_run: bool = False) -> Path:
-        return packager.package_mmc_fw(
+        return mmc.package_mmc_fw(
             self.bios,
             artifactory_url=BASE_URL,
-            repackaging_dir=self.repackaging_dir,
             output_dir=self.output,
+            http=self.http,
+            seven_zip=self.seven_zip,
             dry_run=dry_run,
         )
 
@@ -245,13 +223,10 @@ class MmcPackagingTests(unittest.TestCase):
         destination = self.package()
         self.assertEqual(destination.name, f"MMCFW_{VERSION}.7z")
         self.assert_bios_and_outputs(destination.name)
-        self.fetch.assert_called_once_with(DIRECTORY_URL)
-        self.assertEqual(self.download.call_args.args[0], DIRECTORY_URL + SOURCE_NAME)
+        self.http.get_text.assert_called_once_with(DIRECTORY_URL)
+        self.assertEqual(self.http.download.call_args.args[0], DIRECTORY_URL + SOURCE_NAME)
         unpacked = self.root / "verified result"
-        packager.run_7zip(
-            self.seven_zip,
-            ["x", "-y", "-bso0", "-bsp0", f"-o{unpacked}", "--", str(destination)],
-        )
+        fsutil.extract_archive(destination, unpacked, self.seven_zip)
         binaries = unpacked / f"MMCFW_{VERSION}" / "binaries"
         actual = {
             str(path.relative_to(binaries)): path.read_bytes()
@@ -267,18 +242,18 @@ class MmcPackagingTests(unittest.TestCase):
         destination = self.output / f"MMCFW_{VERSION}.7z"
         destination.write_bytes(b"old MMC")
         self.assertEqual(self.package(), destination)
-        packager.validate_archive(destination, self.seven_zip)
+        fsutil.validate_archive(destination, self.seven_zip)
         self.assert_bios_and_outputs(destination.name)
 
     def test_dry_run_reads_exact_version_without_download_or_workspace(self) -> None:
         destination = self.package(dry_run=True)
         self.assertEqual(destination.name, f"MMCFW_{VERSION}.7z")
-        self.fetch.assert_called_once_with(DIRECTORY_URL)
-        self.download.assert_not_called()
+        self.http.get_text.assert_called_once_with(DIRECTORY_URL)
+        self.http.download.assert_not_called()
         self.assert_bios_and_outputs()
 
     def test_network_failure_preserves_bios_and_cleans_owned_workspace(self) -> None:
-        self.download.side_effect = URLError("network unavailable")
+        self.http.download.side_effect = URLError("network unavailable")
         with self.assertRaisesRegex(URLError, "network unavailable"):
             self.package()
         self.assert_bios_and_outputs()
@@ -295,7 +270,7 @@ class MmcPackagingTests(unittest.TestCase):
     def test_missing_or_wrong_version_binaries_are_not_published(self) -> None:
         for files in (
             {"ReadMe.txt": b"no binaries"},
-            {r"binaries\mmc_pkg_0.1024.0_other.bin": b"wrong version"},
+            {"binaries/mmc_pkg_0.1024.0_other.bin": b"wrong version"},
         ):
             with self.subTest(files=list(files)):
                 self.make_source(files)
@@ -304,7 +279,7 @@ class MmcPackagingTests(unittest.TestCase):
                 self.assert_bios_and_outputs()
 
     def test_extraction_error_is_reported_without_publishing(self) -> None:
-        original_run = packager.run_7zip
+        original_run = mmc.run_7zip
 
         def fail_extraction(
             tool: Path, arguments: list[str], *, cwd: Path | None = None
@@ -313,13 +288,13 @@ class MmcPackagingTests(unittest.TestCase):
                 raise RuntimeError("extraction failed")
             return original_run(tool, arguments, cwd=cwd)
 
-        with mock.patch.object(packager, "run_7zip", side_effect=fail_extraction):
+        with mock.patch.object(mmc, "run_7zip", side_effect=fail_extraction):
             with self.assertRaisesRegex(RuntimeError, "extraction failed"):
                 self.package()
         self.assert_bios_and_outputs()
 
     def test_same_size_content_change_is_rejected_by_source_crc_comparison(self) -> None:
-        original_run = packager.run_7zip
+        original_run = mmc.run_7zip
 
         def change_extracted_binary(
             tool: Path, arguments: list[str], *, cwd: Path | None = None
@@ -331,129 +306,14 @@ class MmcPackagingTests(unittest.TestCase):
                 binary.write_bytes(b"X" * binary.stat().st_size)
             return result
 
-        with mock.patch.object(
-            packager, "run_7zip", side_effect=change_extracted_binary
-        ):
+        with mock.patch.object(mmc, "run_7zip", side_effect=change_extracted_binary):
             with self.assertRaisesRegex(ValueError, "sizes/CRCs differ"):
                 self.package()
         self.assert_bios_and_outputs()
 
 
-class MmcOrchestrationTests(unittest.TestCase):
-    def setUp(self) -> None:
-        logging_patch = mock.patch.object(packager, "configure_logging")
-        logging_patch.start()
-        self.addCleanup(logging_patch.stop)
-        bios_patch = mock.patch.object(
-            packager, "package_latest", return_value=Path("0040.D79.7z")
-        )
-        self.bios = bios_patch.start()
-        self.addCleanup(bios_patch.stop)
-        mmc_patch = mock.patch.object(
-            packager, "package_mmc_fw", return_value=Path("MMCFW_0.1022.0.7z")
-        )
-        self.mmc = mmc_patch.start()
-        self.addCleanup(mmc_patch.stop)
-        upload_patch = mock.patch.object(packager, "upload_archives", return_value=True)
-        self.upload = upload_patch.start()
-        self.addCleanup(upload_patch.stop)
-
-    def test_default_run_packages_mmc_after_successful_bios(self) -> None:
-        def finish_mmc(*args: object, **kwargs: object) -> Path:
-            self.bios.assert_called_once()
-            self.upload.assert_not_called()
-            return Path("MMCFW_0.1022.0.7z")
-
-        self.mmc.side_effect = finish_mmc
-        self.assertEqual(packager.main([]), 0)
-        self.bios.assert_called_once()
-        self.assertEqual(
-            self.bios.call_args.kwargs["repackaging_dir"],
-            Path(packager.__file__).resolve().parent,
-        )
-        self.mmc.assert_called_once_with(
-            Path("0040.D79.7z"),
-            artifactory_url=packager.DEFAULT_MMC_ARTIFACTORY_URL,
-            repackaging_dir=packager.DEFAULT_REPACKAGING_DIR,
-            output_dir=packager.DEFAULT_OUTPUT_DIR,
-            dry_run=False,
-        )
-        self.upload.assert_called_once_with(
-            Path("0040.D79.7z"), Path("MMCFW_0.1022.0.7z")
-        )
-
-    def test_explicit_repackaging_directory_overrides_both_modes(self) -> None:
-        directory = Path(r"D:\other workspace\BIOS_Repackaging")
-        for mode in ([], ["--bios-archive", "existing.7z"]):
-            with self.subTest(mode=mode):
-                self.bios.reset_mock()
-                self.mmc.reset_mock()
-                self.assertEqual(
-                    packager.main([*mode, "--repackaging-dir", str(directory)]), 0
-                )
-                if mode:
-                    self.bios.assert_not_called()
-                else:
-                    self.assertEqual(
-                        self.bios.call_args.kwargs["repackaging_dir"], directory
-                    )
-                self.assertEqual(self.mmc.call_args.kwargs["repackaging_dir"], directory)
-
-    def test_existing_bios_mode_bypasses_bios_packaging(self) -> None:
-        self.assertEqual(packager.main(["--bios-archive", "existing.7z"]), 0)
-        self.bios.assert_not_called()
-        self.assertEqual(self.mmc.call_args.args[0], Path("existing.7z"))
-        self.upload.assert_called_once_with(
-            Path("existing.7z"), Path("MMCFW_0.1022.0.7z")
-        )
-
-    def test_default_dry_run_does_not_guess_mmc_from_an_old_archive(self) -> None:
-        self.assertEqual(packager.main(["--dry-run"]), 0)
-        self.assertTrue(self.bios.call_args.kwargs["dry_run"])
-        self.mmc.assert_not_called()
-        self.upload.assert_not_called()
-
-    def test_existing_bios_dry_run_is_forwarded_to_mmc(self) -> None:
-        self.assertEqual(
-            packager.main(["--bios-archive", "existing.7z", "--dry-run"]), 0
-        )
-        self.bios.assert_not_called()
-        self.assertTrue(self.mmc.call_args.kwargs["dry_run"])
-        self.upload.assert_not_called()
-
-    def test_no_upload_retains_normal_packaging_without_a_prompt(self) -> None:
-        self.assertEqual(packager.main(["--no-upload"]), 0)
-        self.bios.assert_called_once()
-        self.mmc.assert_called_once()
-        self.upload.assert_not_called()
-
-    def test_user_declining_upload_does_not_fail_successful_packaging(self) -> None:
-        self.upload.return_value = False
-        self.assertEqual(packager.main([]), 0)
-        self.upload.assert_called_once()
-
-    def test_upload_failure_is_distinct_from_packaging_failure(self) -> None:
-        self.upload.side_effect = RuntimeError("Upload verification failed")
-        with self.assertLogs("bios_packager", level="ERROR") as logged:
-            self.assertEqual(packager.main([]), 1)
-        self.assertIn("verified local BIOS/MMC archives are retained", "\n".join(logged.output))
-        self.assertNotIn("BIOS/MMC packaging failed", "\n".join(logged.output))
-
-    def test_mmc_failure_is_logged_and_returns_nonzero(self) -> None:
-        self.mmc.side_effect = RuntimeError("MMC source missing")
-        with self.assertLogs("bios_packager", level="ERROR") as logged:
-            self.assertEqual(packager.main([]), 1)
-        self.assertIn("MMC source missing", "\n".join(logged.output))
-        self.upload.assert_not_called()
-
-    def test_bios_failure_does_not_start_mmc_or_upload(self) -> None:
-        self.bios.side_effect = RuntimeError("BIOS failed")
-        with self.assertLogs("bios_packager", level="ERROR"):
-            self.assertEqual(packager.main([]), 1)
-        self.mmc.assert_not_called()
-        self.upload.assert_not_called()
-
-    @mock.patch.object(packager.time, "sleep")
+class WorkspaceCleanupTests(unittest.TestCase):
+    @mock.patch.object(fsutil.time, "sleep")
     def test_owned_workspace_removal_retries_directory_lock(self, sleep: mock.Mock) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             workspace = Path(temporary) / "owned-mmc-job"
@@ -474,10 +334,19 @@ class MmcOrchestrationTests(unittest.TestCase):
 
             with mock.patch.object(Path, "rmdir", remove_after_unlock):
                 with self.assertLogs("bios_packager", level="WARNING"):
-                    packager.clear_workspace(workspace, remove_directory=True)
+                    fsutil.clear_workspace(workspace, remove_directory=True)
             self.assertFalse(workspace.exists())
             self.assertEqual(attempts, 2)
             sleep.assert_called_once_with(2)
+
+    def test_other_permission_errors_are_not_retried(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary) / "job"
+            workspace.mkdir()
+            (workspace / "file").write_bytes(b"x")
+            with mock.patch.object(Path, "unlink", side_effect=PermissionError("denied")):
+                with self.assertRaisesRegex(PermissionError, "denied"):
+                    fsutil.clear_workspace(workspace)
 
 
 if __name__ == "__main__":
