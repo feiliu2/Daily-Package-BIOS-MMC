@@ -9,7 +9,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$scriptPath = Join-Path $PSScriptRoot 'package_latest_bios.py'
+$scriptPath = Join-Path $PSScriptRoot 'main.py'
 if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) {
     throw "Packaging script not found: $scriptPath"
 }

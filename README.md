@@ -1,346 +1,302 @@
 # Daily OakStream BIOS and matching MMC packaging
 
-The wrapper finds the newest `OAKSTRM.0.RPB.<release>.D.<revision>/`
-directory in the Artifactory index and invokes the existing
-`restructure_new.py`. Release and revision are compared **numerically**,
-not by HTML link order, lexical order or directory modification time.
-After BIOS packaging, it reads that archive's MMC firmware version and
-downloads/packages the exact matching MMC build, not the newest unrelated version.
-After both archives are ready, it asks for explicit Windows desktop confirmation
-before offering a one-time token prompt and uploading them to their respective
-Artifactory destinations. Declining keeps the verified local archives only.
+A standalone, cross-platform (Windows and Linux) Python tool that:
 
-For an offline Chinese workflow diagram, commands and cleanup/error rules, open
-[packaging-workflow.html](packaging-workflow.html) in a browser. It is self-contained
-and supports printing or saving as PDF.
+1. Finds the newest `OAKSTRM.0.RPB.<release>.D.<revision>/` build on Artifactory
+   (release and revision compared **numerically**), or the one given with `--bios`.
+2. Rebuilds the BIOS ID package (`<release>.D<revision>.7z`) natively. This is a
+   reimplementation of OakStreamAPIfwi's `restructure_new.py`, driven by the
+   `biosid_oak_ap.xlsx` component mapping fetched from the IFWI GitHub repository.
+3. Reads the MMC version that BIOS references and packages exactly that MMC build
+   as `MMCFW_<version>.7z`.
+4. Optionally uploads both archives to Artifactory with `--upload`, using a token from
+   `IFWI_ARTIFACTORY_TOKEN`.
 
-For example, `OAKSTRM.0.RPB.0040.D.79/` becomes:
+No local OakStreamAPIfwi checkout, edkrepo, bundled `7z.exe`, `UnzipManger.exe`,
+pandas or openpyxl is required.
 
-```text
---bios=0040D79 --package_fdr_file=0040.D79.7z
+For an offline Chinese overview, open [packaging-workflow.html](packaging-workflow.html).
+
+## Requirements
+
+- Python 3.10 or later (standard library only).
+- Native 7-Zip on `PATH`:
+  - **Windows:** install 7-Zip. `C:\Program Files\7-Zip\7z.exe` is found automatically.
+  - **Linux:** `sudo apt install 7zip` (provides `7zz`) or `p7zip-full` (provides `7z`).
+  - Or pass `--seven-zip /path/to/7z`.
+- Network access to the Intel Artifactory and to `api.github.com`. The standard
+  `HTTP(S)_PROXY` / `NO_PROXY` variables are honoured.
+
+## Environment variables
+
+| Variable | When | Purpose |
+|---|---|---|
+| `IFWI_GITHUB_TOKEN` | BIOS packaging (unless `--mapping-xlsx`) | Read `biosid_oak_ap.xlsx` from `intel-innersource/firmware.boot.uefi.iafw.devops.build.ifwi`. The FIV Ubuntu image (v1.1.3+) already provides it. |
+| `IFWI_ARTIFACTORY_TOKEN` | required for `--upload` / `upload`; optional otherwise | One Artifactory token for both servers. Required for `DEG-IFWI-LOCAL` uploads. When set, it is also sent on source downloads; otherwise downloads are anonymous. The FIV Ubuntu image already provides it. |
+| `SSL_CERT_FILE` | optional | CA bundle; alternatively `--ca-bundle` |
+
+Tokens are never accepted as command-line arguments and are never logged.
+
+## Entry point and subcommands
+
+`main.py` is the single entry point and dispatches to one step at a time.
+`python -m bios_mmc` is equivalent.
+
+| Command | Does | Implementation |
+|---|---|---|
+| `main.py [options]` | Full flow: BIOS ID, then the matching MMC, then upload if `--upload` | `bios_mmc/cli.py` |
+| `main.py bios [options]` | Package only the BIOS ID archive | `bios_mmc/bios.py` |
+| `main.py mmc --bios-archive X [options]` | Package only the MMC referenced by an existing BIOS archive (`--upload` uploads that pair) | `bios_mmc/mmc.py` |
+| `main.py upload [options]` | Upload an existing BIOS/MMC pair | `bios_mmc/upload.py` |
+
+Each subcommand accepts only its own options. Run `main.py <subcommand> --help` to
+see them. Shared options (`--output-dir`, `--seven-zip`, `--dry-run`, `--log-dir`,
+`--ca-bundle`) mean the same thing everywhere.
+
+## Package BIOS and MMC
+
+Linux / macOS shell:
+
+```bash
+export IFWI_GITHUB_TOKEN=...       # needs read access to the IFWI repository
+python3 main.py --dry-run
+python3 main.py
 ```
 
-## Prerequisites
-
-This repository is **not a standalone BIOS repackager**. It requires a local
-`OakStreamAPIfwi` source workspace. **`C:\OKS\OakStreamAPIfwi` below is an example,
-not a hardcoded source location.**
-The automation does not clone or initialize that workspace during daily runs.
-
-Install/configure `edkrepo` with access to the `OakStreamAPIfwi` project and its
-source repositories, then download the code **from the parent directory
-`C:\OKS`**:
+Windows PowerShell:
 
 ```powershell
-New-Item -ItemType Directory -Force -Path 'C:\OKS' | Out-Null
-Set-Location 'C:\OKS'
-edkrepo clone OakStreamAPIfwi OakStreamAPIfwi
+$env:IFWI_GITHUB_TOKEN = '...'
+python .\main.py --dry-run
+python .\main.py
 ```
 
-This creates `C:\OKS\OakStreamAPIfwi`. If that workspace already exists, reuse it
-and skip cloning; do not overwrite or delete the existing source workspace.
+`--dry-run` fetches and parses the mapping and resolves every component package URL.
+It does not download firmware or write archives.
 
-The workspace must contain the original repackager at
-`Ifwi\oak_release\BuildScripts\CommonLib\BIOS_Repackaging`, including
-`restructure_new.py`, `Config\config_oak_ap.ini`, and the bundled `7-Zip` tools.
+Useful options:
 
-Deploy [package_latest_bios.py](package_latest_bios.py) and
-[Register-BiosPackagingTask.ps1](Register-BiosPackagingTask.ps1), together with
-[Upload-BiosMmc.ps1](Upload-BiosMmc.ps1), into that
-`BIOS_Repackaging` directory, beside `restructure_new.py`. If the automation
-files are already included in the source branch you cloned, no copying is needed.
-**The default tool directory is the automation script's own directory**, not the
-current working directory. There is no fallback to another source workspace.
+| Option | Default | Meaning |
+|---|---|---|
+| `--bios 0040D79` | newest | Package a specific BIOS ID (`0040D79`, `0040.D79` or `0040.D.79`) |
+| `--output-dir` | `C:\LocalPath\Bios` (Windows), `~/LocalPath/Bios` (Linux) | Final archives |
+| `--mapping-repo` | `intel-innersource/firmware.boot.uefi.iafw.devops.build.ifwi` | GitHub repository of the mapping |
+| `--mapping-path` | `oak_release/BuildScripts/CommonLib/BIOS_Repackaging/biosid_oak_ap.xlsx` | Mapping file path in that repository (for example `.../biosid_oak_sp.xlsx`) |
+| `--mapping-ref` | `release/ap.post-silicon` | Branch, tag or commit. The repository's `main` branch does not contain the mapping. |
+| `--mapping-url` | — | Full GitHub contents API URL; overrides the three options above |
+| `--mapping-xlsx` | — | Use a local xlsx; no GitHub access. Cannot be combined with `--mapping-url` |
+| `--jobs` | CPU count | Parallel component downloads/extractions |
+| `--archive-threads N` | 7-Zip automatic selection | Threads for final BIOS/MMC compression (`-mmt=N`, N >= 1); available in the full flow, `bios` and `mmc`. Does not limit extraction or validation threads. |
+| `--download-retry` | 3 | Attempts per component download + extraction |
+| `--bios-branch` | `main` | BIOS branch folder (`main`, `dmr_ap1_b0_po_platform`, `oks_milestone_rel`, ...) |
+| `--bios-base-url` | `.../Daily/OakStreamRp/` | Folder containing the BIOS branch folders |
+| `--mmc-branch` | `zcode_dmr_ap_dev` | MMC branch folder (`zcode_dmr_ap1_beta_rel`, `zcode_dev`, ...) |
+| `--mmc-base-url` | `.../Daily/ZCodeFW/` | Folder containing the MMC branch folders |
+| `--seven-zip`, `--ca-bundle`, `--log-dir` | auto / system / `logs` | Tools and diagnostics |
+| `--upload` | off | Upload both archives after successful packaging |
 
-Use Python 3.10 or later with the existing repackager's dependencies
-installed. The wrapper itself uses only the standard library. The scheduled
-task pins the full Python executable path at registration.
-The confirmed upload step additionally requires Windows PowerShell 5.1 and
-`curl.exe` on `PATH`. Standalone uploading needs only those Windows tools and
-the upload script; it does not require Python or the OakStream source workspace.
+Single steps (the full flow above just runs `bios` then `mmc`):
 
-## Defaults
-
-- Artifactory: the `Daily/OakStreamRp/main/` index supplied for this project.
-- MMC Artifactory: `Daily/ZCodeFW/zcode_dmr_ap_dev/`, using the BIOS-derived
-  `MMC_FW.DMR_AP.<version>/DMR_ZCODE_DebugSigned_linux/` directory.
-- Existing repackager: the directory containing `package_latest_bios.py`,
-  normally `BIOS_Repackaging` alongside `restructure_new.py`.
-  Override with `--repackaging-dir` when keeping the automation elsewhere.
-- Original configuration: `Config\config_oak_ap.ini` in that directory.
-- Final archives: `C:\LocalPath\Bios`.
-- Upload server: `https://af01p-sc.devtools.intel.com/artifactory/DEG-IFWI-LOCAL/`.
-  BIOS archives go to `FIV_Portal/IFWI_CI/BIOSID/`; MMC archives go to
-  `FIV_Portal/IFWI_CI/MMC/`, keeping their original filenames.
-- Original workspace: `C:\ATF`, emptied after the BIOS archive is verified.
-- Logs: `logs` beside [package_latest_bios.py](package_latest_bios.py).
-- Daily schedule: **15:00, local computer time**.
-
-## Preview and run
-
-From the deployed `BIOS_Repackaging` directory containing both Python scripts:
-
-```powershell
-python .\package_latest_bios.py --dry-run
-python .\package_latest_bios.py
+```bash
+python3 main.py bios --bios 0040D79
 ```
 
-The actual run offers upload **only after both packaging steps succeed**.
-Choose **No** in the confirmation window to finish without uploading.
-For local packaging without any upload window:
+To package only MMC for an existing BIOS archive (no mapping or BIOS download):
 
-```powershell
-python .\package_latest_bios.py --no-upload
+```bash
+python3 main.py mmc --bios-archive ~/LocalPath/Bios/0040.D79.7z
 ```
 
-The preview queries the real index and prints the selected BIOS ID and
-planned command. It does not run the repackager or create output archives.
-MMC selection is deferred until the new BIOS exists; the preview never guesses
-its version from an older archive.
-Use `--help` for URL, directory, configuration and log overrides.
-The `DEFAULT_*` constants in the Python script control the defaults used
-by the scheduled task as well as manual runs.
+### Branches
 
-If running from a separate automation checkout, explicitly point to the existing
-tools, for example:
+Both sources are organized by branch on Artifactory. `--bios-branch` and
+`--mmc-branch` select the folder under `--bios-base-url` and `--mmc-base-url`.
 
-```powershell
-python .\package_latest_bios.py --repackaging-dir "C:\OKS\OakStreamAPIfwi\Ifwi\oak_release\BuildScripts\CommonLib\BIOS_Repackaging" --dry-run
+- **BIOS:** builds are `OAKSTRM.0.RPB.<release>.D.<rev>/` on every branch; the
+  newest is chosen numerically within the selected branch.
+- **MMC:** the version folder is named differently per branch
+  (`MMC_FW.DMR_AP.0.999.0/` on `zcode_dmr_ap_dev`, `MMC_FW.0.915.2/` on
+  `zcode_dmr_ap1_beta_rel`). Exactly one `MMC_FW.[<prefix>.]<version>/` folder must
+  match, then `DMR_ZCODE_DebugSigned_linux/*_BuildPkg.7z` is used.
+- **Mapping:** `biosid_oak_ap.xlsx` describes the component folders of the
+  `main` BIOS builds. Other BIOS branches may need a matching `--mapping-ref` or
+  `--mapping-xlsx`.
+
+### How the BIOS package is built
+
+This step reproduces `restructure_new.py`:
+
+1. **Read the mapping.** It reads the `config` sheet of the mapping, with the columns
+   `Original Package`, `Original Binary`, `Original Folder` and `Package file`, and
+   groups the rows by package and folder.
+2. **Find each package.** In the build directory, it takes the folder named
+   `Original Folder`. Inside it, it picks the newest file (by the index timestamp)
+   matching the `Original Package` regex.
+3. **Download and extract.** Each package is downloaded and extracted, retrying
+   truncated or corrupt downloads. If an extracted package contains
+   `IFWIStitch20.bin`, that file is unzipped as well.
+4. **Copy files.** For each row, it copies every file or directory whose full path
+   matches `Original Binary + '$'` (case-insensitive) into `Package file`.
+   - Paths are matched with `\` separators on every OS, so the existing regexes
+     behave the same on Linux.
+   - `Fv*Path.dsc` rows concatenate `<name>*.dsc` siblings, byte-for-byte as the
+     original produced them on Windows.
+   - `BinaryFvSpr.fdf` gets the S3M path rewritten to `$(FD_BIN_PKG)`.
+5. **Report.** A package with any missing file is reported as *not packaged*. Its
+   other files are still included, and the archive is still produced, as before.
+   Every target folder is pre-created.
+6. **Publish.** The tree is archived with 7-Zip, tested, and atomically moved into the
+   output directory.
+
+Downloads and extraction run in parallel. Copying runs one package at a time in
+spreadsheet order, so packages that share a target folder (such as `Tools\BaseTools`)
+are deterministic.
+
+Differences from the original:
+
+- **No fixed work directory.** There is no `C:\ATF`. Staging is a private temporary
+  directory inside the output directory, always removed afterwards.
+- **Output directory is not wiped.** The original deleted the whole output directory;
+  now only the target archive is replaced.
+- **Exact folder match first.** An exact folder name is preferred over regex
+  matches, which the original resolved by listing order.
+
+## Upload
+
+Uploading is off by default. After successful packaging, add `--upload`. To upload an
+existing pair, use the `upload` subcommand:
+
+```bash
+export IFWI_ARTIFACTORY_TOKEN=...
+python3 main.py upload --dry-run
+python3 main.py upload
+python3 main.py upload --bios-archive ./0040.D82.7z --mmc-archive ./MMCFW_0.1022.0.7z
 ```
 
-Remove `--dry-run` to package. This override also applies to the MMC-only mode
-below; it changes only that invocation and is not saved in the scheduled task.
+Without explicit paths, the `upload` subcommand requires exactly one `NNNN.D<rev>.7z`
+and one `MMCFW_x.y.z.7z` in `--source-dir`. It never guesses between several.
 
-To package only MMC from an existing BIOS without rebuilding or deleting BIOS:
+Archives keep their original names. The destination is set by three options,
+accepted by the full flow, `mmc --upload` and `upload`:
 
-```powershell
-python .\package_latest_bios.py --bios-archive C:\LocalPath\Bios\0040.D79.7z --dry-run
-python .\package_latest_bios.py --bios-archive C:\LocalPath\Bios\0040.D79.7z
+| Option | Default |
+|---|---|
+| `--upload-url` | `https://af01p-sc.devtools.intel.com/artifactory/DEG-IFWI-LOCAL` (`https://<host>/artifactory/<repository>`) |
+| `--upload-bios-path` | `FIV_Portal/IFWI_CI/BIOSID` |
+| `--upload-mmc-path` | `FIV_Portal/IFWI_CI/MMC` |
+
+The upload runs in these steps:
+
+1. Compute SHA-256 for both files. `--dry-run` stops here and reads no token.
+2. Read `IFWI_ARTIFACTORY_TOKEN`. If it is missing or malformed, fail before any request.
+3. Preflight both destination folders and both filenames.
+   - An identical size and SHA-256 is skipped.
+   - A different same-name archive fails without uploading either file.
+4. Stream each missing archive with HTTP PUT and `X-Checksum-Sha256`. The upload is
+   rejected if the local file changes during transfer.
+5. Re-read the server metadata and require the exact repository, path, size and
+   SHA-256.
+
+Re-running the upload retries safely; files that are already identical are skipped.
+
+### Target pre-check (`--upload` in the full flow and `mmc`)
+
+Repackaging identical content produces a different archive SHA-256, because 7-Zip
+stores file modification times. Without a pre-check, rebuilding a version that is
+already published would waste a full rebuild and then fail the upload with
+"Refusing to overwrite". So, when `--upload` is given, the destination is checked
+**before** packaging:
+
+| Target already has | What happens |
+|---|---|
+| Neither archive | Package BIOS and MMC, upload both |
+| `<release>.D<rev>.7z` | BIOS is not repackaged. A local copy whose SHA-256 matches the published one is reused; otherwise the published file is downloaded and verified. Its MMC version is then read. |
+| `MMCFW_<version>.7z` | MMC is not repackaged or uploaded |
+| Both | Nothing is packaged or uploaded; exit 0 |
+
+- The pre-check reads `IFWI_ARTIFACTORY_TOKEN`, so a missing token now fails before
+  any packaging work.
+- With `--dry-run --upload`, the BIOS check is reported but nothing is downloaded.
+- Without `--upload`, the target is never contacted and packaging runs as before.
+- The `upload` subcommand is unchanged: it uploads the files it is given.
+
+## Logs and exit codes
+
+The console and `logs/package-bios-YYYYMMDD.log` (beside the script) get the same
+output. This includes:
+
+- the mapping source and its SHA-256
+- each component URL
+- the packaged / not packaged summary
+- MMC selection
+- upload results
+
+The exit code is `0` on success and `1` on any packaging or upload failure. Upload
+failures keep the verified local archives.
+
+## Machine-readable result (`--result-json`)
+
+Every command accepts `--result-json PATH`. Automation should read this file
+instead of parsing the log. It is written atomically on success **and** on failure.
+It is not written when the command line itself is invalid (argparse exits with
+code 2 before running).
+
+```json
+{
+  "schema_version": 1,
+  "command": "all",
+  "status": "success",
+  "exit_code": 0,
+  "dry_run": false,
+  "error": null,
+  "started_at": "2026-11-08T12:46:01+00:00",
+  "finished_at": "2026-11-08T12:56:29+00:00",
+  "bios_id": "0040D90",
+  "mmc_version": "0.1027.0",
+  "upload_target": "https://af01p-sc.devtools.intel.com/artifactory/DEG-IFWI-LOCAL",
+  "bios": {
+    "name": "0040.D90.7z", "path": "/out/bios/0040.D90.7z",
+    "sha256": "74e4dd4f…", "size": 696456137,
+    "packaging": "packaged", "upload": "uploaded", "skipped": false,
+    "remote_url": "https://…/DEG-IFWI-LOCAL/FIV_Portal/IFWI_CI/BIOSID/0040.D90.7z"
+  },
+  "mmc": {
+    "name": "MMCFW_0.1027.0.7z", "path": null,
+    "sha256": "4644fcb3…", "size": 21692334,
+    "packaging": "skipped_published", "upload": "skipped_published", "skipped": true,
+    "remote_url": "https://…/DEG-IFWI-LOCAL/FIV_Portal/IFWI_CI/MMC/MMCFW_0.1027.0.7z"
+  }
+}
 ```
 
-In this mode, the preview reads the existing BIOS and queries its matching MMC
-directory, but downloads/extracts nothing and leaves existing archives unchanged.
-Use `--mmc-artifactory-url` to override the MMC base URL.
-Successful MMC-only runs also offer to upload the explicitly selected BIOS and
-its freshly generated MMC archive; `--no-upload` suppresses that offer.
+| Field | Values |
+|---|---|
+| `status` / `exit_code` | `success` / `0`, or `failed` / `1`; `error` holds the first line of the failure |
+| `bios_id`, `mmc_version` | `null` until known (for example, no MMC version on a `--dry-run` or before BIOS exists) |
+| `upload_target` | Set when an upload or target check is involved; otherwise `null` |
+| `mapping` | The mapping actually used when BIOS was packaged: `kind` (`github` / `url` / `local`), `location`, `repo`, `path`, `ref`, `sha256`, `component_packages`, `file_rows`. `null` when no BIOS was packaged (for example, `mmc`, `upload`, or a BIOS reused from the target) |
+| `packaging` | `packaged`, `skipped_published` (already in the target, not rebuilt), `provided` (given with `--bios-archive`/`--mmc-archive`), `planned` (`--dry-run`), `not_run` |
+| `upload` | `uploaded`, `already_present` (identical file found by the upload preflight), `skipped_published`, `preview` (`--dry-run`), `not_requested`, `failed`, `not_run` |
+| `skipped` | `true` when the archive was already published and was neither rebuilt nor uploaded |
+| `path` | Absolute local path, or `null` when there is no local file (for example, a skipped MMC) |
+| `sha256`, `size` | Of the local file; for a skipped archive, of the published file. `null` for `--dry-run` |
 
-## Upload existing BIOS and MMC archives
+SHA-256 is computed only when `--result-json` is given, so normal runs are not
+slowed down. If the result file cannot be written, the run exits with `1`.
 
-The standalone script does not rebuild, rename, delete or recompress archives:
+## Scheduling
 
-```powershell
-.\Upload-BiosMmc.ps1 -WhatIf
-.\Upload-BiosMmc.ps1
-```
-
-By default, it requires exactly one `<release>.D<revision>.7z` BIOS archive
-(four-digit release) and one `MMCFW_<major>.<minor>.<patch>.7z` in
-`C:\LocalPath\Bios`. Missing, empty or ambiguous selections fail explicitly;
-it never guesses the newest file or uploads every historical archive.
-Use `-SourceDirectory 'D:\Firmware'` for another directory, or select both paths:
-
-```powershell
-.\Upload-BiosMmc.ps1 -BiosArchive 'C:\LocalPath\Bios\0040.D82.7z' -MmcArchive 'C:\LocalPath\Bios\MMCFW_0.1022.0.7z'
-```
-
-Both explicit options must be supplied together. Standalone selection uses
-filenames and does not re-decode the BIOS's MMC version; select the matched pair.
-The integrated flow passes the exact BIOS and MMC paths returned by packaging,
-not another archive discovered later in the output directory.
-
-The sequence is always:
-
-1. Check the two local files, calculate SHA-256 and display their destinations.
-2. Show a **Yes/No/Cancel confirmation window, defaulting to No**. Choosing No,
-   Cancel or closing it
-   requests no token and makes no HTTP requests. `-WhatIf` only previews the
-   plan: no confirmation, credentials or network access.
-3. Only after Yes, prompt once using the Windows credential dialog. Keep the
-   username unchanged and paste the **Artifactory Access Token into Password**.
-   Cancelling this dialog also makes no HTTP requests.
-4. Preflight both destination folders and both existing filenames before any
-   upload. Matching size and SHA-256 means skip; a different same-name archive
-   fails without overwriting either destination.
-5. Stream each missing archive using native `curl.exe` HTTPS PUT, sending the
-   expected SHA-256 header. Re-read server metadata and require the exact
-   repository, path, byte size and SHA-256 before reporting it verified.
-
-The token is never accepted as a plaintext command-line option or written to
-disk, environment variables or logs. It goes to curl through stdin and is
-discarded after the batch. Do not put tokens in scripts or share them in chat.
-Each upload has a 30-minute transfer limit; metadata requests have a 60-second
-limit. Source files are held read-only against concurrent writes/deletes until
-the operation ends.
-
-Declining/cancelling is explicitly reported and returns exit code 0; real upload
-or verification errors return nonzero. Failures do not remove local files or
-roll back a separately verified remote BIOS if the later MMC upload fails.
-Rerun this standalone script to retry only uploading; already identical files
-will be skipped. When launched by the Python wrapper, progress and the final
-result go to both the console and the daily packaging log. Standalone output
-goes to the invoking console.
-
-## Register the daily task
-
-Run registration from the same deployed directory as the three automation files.
-The task starts the adjacent automation script, which locates the original tools
-relative to itself. If you move the automation after registration, update the
-existing task's action to its new location.
-
-Preview the registration without creating a task:
-
-```powershell
-.\Register-BiosPackagingTask.ps1 -WhatIf
-```
-
-Register it:
-
-```powershell
-.\Register-BiosPackagingTask.ps1
-```
-
-Use `-At '15:30'` to change the time, or `-PythonPath` to select the
-Python installation containing the repackager's dependencies.
-Registration does not immediately start packaging. It also does not
-overwrite an existing task with the same name.
-
-The task runs as the current user without saving a password, so that user
-must remain logged on. The computer must be on and connected to the Intel
-network or VPN. Missed runs start when available; failures retry up to
-three times at 15-minute intervals. Overlapping scheduled runs are ignored.
-Battery operation is allowed, and switching to battery does not stop a run.
-The wrapper limits the BIOS child to three hours and each 7-Zip step to
-30 minutes; the task has a four-hour overall limit.
-The confirmed upload is intentionally **not unattended**: after packaging the
-logged-in user must choose Yes and enter a token, otherwise nothing is uploaded.
-An unanswered confirmation/token window waits within the task's existing
-four-hour limit. Upload errors are nonzero failures, so an existing scheduled
-retry repeats packaging and asks for fresh approval; use the standalone upload
-script when only the transfer needs retrying. No task is registered or changed
-merely by updating these files.
-
-## Execution flow
-
-1. At the scheduled time, read the Artifactory index and select the newest BIOS ID.
-2. Run the existing command in the original `BIOS_Repackaging` directory:
-
-   ```text
-   python restructure_new.py --bios=0040D79 --package_fdr_file=0040.D79.7z --file_path=C:\LocalPath\Bios --config_ini=config_oak_ap.ini
-   ```
-
-3. The original script uses `C:\ATF` for downloads/extracted files and writes the
-   archive directly to `C:\LocalPath\Bios`. The original INI is read, not modified;
-   no temporary INI or alternate workspace/output directory is created.
-4. After the child finishes, repeat its final summary in the console and daily
-   log: total component packages, packaged/not-packaged counts, missing package
-   names and the original elapsed time. These counts describe the source
-   component/build packages, not individual files inside the BIOS archive.
-   If the child exited successfully, validate the archive with the bundled
-   `7-Zip\7z.exe t`.
-5. Only after validation succeeds, delete the contents of `C:\ATF`, leaving the
-   directory itself empty.
-6. Read all `DEFINE MMC1`/`DEFINE MMC2` references in the BIOS archive's
-   `Trunk_*\dsc\FvRawDefPath.dsc` files. Require one consistent `mmc_pkg_<version>_`
-   version across all references. This is the build/stitching configuration's
-   version, not an independently decoded ROM-internal version field.
-7. Query the exact MMC version's `DMR_ZCODE_DebugSigned_linux/` directory and
-   download its single `_BuildPkg.7z`. Multiple or missing build packages fail
-   explicitly. Loose `.bin` files in the download index are not mixed into
-   `binaries`.
-8. Extract only the source archive's `binaries` subtree, including its license
-   files. Other source/build directories are never extracted. Use direct 7-Zip
-   calls with explicit destinations, not the original BIOS unpacking helper.
-9. Produce `MMCFW_<version>.7z` with exactly this structure:
-
-   ```text
-   MMCFW_0.1022.0\
-     binaries\
-       LICENSE-3RD-PARTY.txt
-       LICENSE-Intel-Agreement.txt
-       mmc_pkg_0.1022.0_...bin
-       ...
-   ```
-
-10. Fully test the MMC archive and require its file paths, sizes and CRCs to
-    match the downloaded source's `binaries` subtree before publishing it.
-    Remove the uniquely owned MMC staging directory; no downloaded/extracted
-    MMC files remain. Staging is on the output volume so replacement is atomic.
-11. Unless `--no-upload` is set, launch the adjacent
-    [Upload-BiosMmc.ps1](Upload-BiosMmc.ps1) with these exact archive paths.
-    Ask for approval before requesting a token or making HTTP requests.
-    Upload/verify only after approval; a declined offer leaves both local files.
-
-The final output contains the latest BIOS archive and its corresponding
-`MMCFW_<version>.7z`. For example, the current `0040.D79.7z` references
-MMC `0.1022.0`, producing `MMCFW_0.1022.0.7z`; it does not select `0.1024.0`
-merely because that version also exists.
-
-The original command is executed on every run, even if the latest BIOS ID has
-not changed. **The original repackager clears the output directory before writing
-the new archive: older BIOS/MMC archives and any other files there are not
-preserved.** This latest-pair-only behavior is intentional. The standalone
-`--bios-archive` mode does not run this destructive BIOS step.
-
-## Safety and errors
-
-- Both `C:\ATF` and `C:\LocalPath\Bios` must be dedicated to BIOS packaging.
-  Do not store other data there or run another manual build concurrently.
-- The original configuration must specify `work_space = C:\ATF`. The wrapper
-  reports a mismatch instead of rewriting the INI or cleaning another directory.
-- Preflight checks reject overlapping, linked/junction or protected workspace
-  and output paths, including roots and paths containing the project,
-  repackager, configuration, logs, current working directory or user home.
-- The workspace path must contain no whitespace or periods because of the
-  original repackager's extraction and compression path handling. The normal
-  `C:\ATF` path satisfies this requirement.
-- Dry runs do not execute the BIOS command or delete anything. If BIOS packaging or
-  BIOS archive validation fails, no final workspace cleanup is performed; whatever the original
-  script left in the workspace is retained for investigation. The original script
-  may already have replaced workspace/output contents before a failure.
-- MMC failures return a nonzero exit code without deleting or modifying the BIOS.
-  Existing same-version MMC output is replaced only after the new archive passes
-  verification. Owned MMC staging files are cleaned on both success and failure;
-  unrelated files and other jobs' staging directories are not swept.
-- Upload never runs after a failed BIOS/MMC step or during `--dry-run`.
-  `--no-upload` preserves the packaging-only behavior. Confirmation or token
-  cancellation is logged distinctly from a completed upload, not reported as
-  remote success. A zero-exit uploader missing its final result is an error.
-- Upload failures preserve the verified local archives and return exit code 1
-  separately from packaging failures. No differing same-name remote archive is
-  overwritten, and neither local nor remote files are deleted by the uploader.
-- Unsafe archive paths, links inside `binaries`, missing/inconsistent MMC
-  references, and a source binary version different from the BIOS are rejected.
-- Workspace cleanup retries Windows sharing/lock violations up to five times at
-  two-second intervals. Persistent locks and other errors are reported as failures.
-- HTTP errors, login pages without build directories, missing tools and
-  packaging/validation/cleanup failures are logged and return exit code 1.
-  The wrapper does not silently select an older build or trust an unverified archive.
-- Each run has a separate `restructure-*.log`. The daily `package-bios-*.log`
-  contains BIOS/MMC selection, command and result information. Logs are retained outside
-  the workspace and BIOS output directory.
-- The original BIOS final summary is echoed to both the console and daily log
-  before archive verification/cleanup, including on a failed child exit when
-  that report is available. Nonzero not-packaged counts are shown as warnings.
-  Missing, incomplete or inconsistent reports are explicitly warned about;
-  unknown counts are never displayed as zero. The full child log remains
-  available for investigation. Reporting does not change the original exit-code,
-  archive-verification or cleanup rules.
+Scheduling is outside the scope of this tool. `Register-BiosPackagingTask.ps1` still
+registers a Windows task that runs the script daily. Because uploads no longer prompt,
+add `--upload` and provide `IFWI_ARTIFACTORY_TOKEN` (and `IFWI_GITHUB_TOKEN`) in the task's
+environment if unattended uploads are wanted. On Linux, use cron or a systemd timer
+the same way.
 
 ## Tests
 
-```powershell
-python -m unittest discover -s tests -p "test_package*.py" -v
+```bash
+python -m unittest discover -s tests -v
 ```
 
-The integration tests use generated test data and an existing native 7-Zip:
-the adjacent bundle, one on `PATH`, or a standard Windows/Scoop installation.
-They copy the tools into owned test fixtures and do not depend on a fixed
-OakStream workspace location. If no suitable 7-Zip is installed, native integration
-tests explicitly report that they are skipped. They do not download firmware or
-execute the real BIOS repackager.
-Upload tests use native PowerShell/curl against an isolated loopback HTTP server
-and generated archives/synthetic tokens, without a real token, GUI prompts or
-Intel uploads. They cover confirmation-before-auth/network ordering, cancellation,
-preview, exact routing/content/checksums, idempotency, conflicts before any PUT,
-failed authentication/transfers/verification, retry after partial success,
-literal paths with spaces/brackets, source locks and console/daily-log routing.
+Integration tests use the native 7-Zip found as described above and a local fake
+Artifactory/GitHub HTTP server. The suite passes on Windows and on Ubuntu 24.04.
