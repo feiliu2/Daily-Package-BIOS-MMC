@@ -498,6 +498,7 @@ python3 main.py upload --bios-archive ./0040.D82.7z --mmc-archive ./MMCFW_0.1022
             <p>上传或校验失败时返回非零，保留本地文件。如果 BIOS 已成功而 MMC 失败，不删除远端已校验的 BIOS。用 <code>upload</code> 子命令重试时，相同的文件会自动跳过。</p>
           </article>
         </div>
+        <div class="logs"><strong>机器可读结果：</strong>所有命令都支持 <code>--result-json PATH</code>。无论成功还是失败，都会原子地写出一个 JSON 文件，包含 <code>status</code>、<code>exit_code</code>、<code>error</code>、<code>bios_id</code>、<code>mmc_version</code>，以及两个包各自的路径、SHA-256、大小、打包状态、上传状态、<code>skipped</code>（是否因已发布而跳过）和远端地址。自动化流程应读取这个文件，而不是解析日志。字段说明见 README。</div>
         <div class="logs"><strong>排查日志：</strong>控制台输出与脚本旁的 <code>logs/package-bios-YYYYMMDD.log</code> 内容相同。日志记录映射来源和 SHA-256、每个组件的 URL、打包和未打包的汇总、MMC 的选择，以及上传结果。</div>
       </section>
     </main>

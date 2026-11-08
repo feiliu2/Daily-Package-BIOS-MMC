@@ -13,6 +13,7 @@ import seven_zip_support  # noqa: F401  (adds the repository root to sys.path)
 from bios_mmc import cli
 from bios_mmc import artifactory, fsutil
 from bios_mmc.artifactory import BiosBuild
+from bios_mmc.upload import RemoteArchive
 
 REPOSITORY = cli.REPOSITORY_DIR
 
@@ -393,6 +394,8 @@ class TargetPreCheckTests(CliFixture):
 
     BIOS = "0040.D79.7z"
     MMC = "MMCFW_0.1022.0.7z"
+    BIOS_META = RemoteArchive("BIOS", BIOS, "https://up.test/BIOSID/" + BIOS, 10, "a" * 64)
+    MMC_META = RemoteArchive("MMC", MMC, "https://up.test/MMC/" + MMC, 5, "b" * 64)
 
     def test_without_upload_the_target_is_never_contacted(self) -> None:
         self.assertEqual(cli.main(self.common), 0)
@@ -413,19 +416,19 @@ class TargetPreCheckTests(CliFixture):
         )
 
     def test_both_published_skips_packaging_and_upload(self) -> None:
-        self.published = {self.BIOS: "bios-meta", self.MMC: "mmc-meta"}
+        self.published = {self.BIOS: self.BIOS_META, self.MMC: self.MMC_META}
         with self.assertLogs("bios_packager", level="INFO") as logged:
             self.assertEqual(cli.main([*self.common, "--upload"]), 0)
         self.mocks["load_mapping"].assert_not_called()
         self.mocks["package_bios"].assert_not_called()
         self.mocks["package_mmc_fw"].assert_not_called()
         self.mocks["upload_archives"].assert_not_called()
-        self.remote.obtain.assert_called_once_with("bios-meta", self.output / self.BIOS)
+        self.remote.obtain.assert_called_once_with(self.BIOS_META, self.output / self.BIOS)
         self.mocks["read_mmc_version"].assert_called_once()
         self.assertIn("both already published", "\n".join(logged.output))
 
     def test_published_bios_missing_mmc_packages_and_uploads_only_mmc(self) -> None:
-        self.published = {self.BIOS: "bios-meta"}
+        self.published = {self.BIOS: self.BIOS_META}
         self.assertEqual(cli.main([*self.common, "--upload"]), 0)
         self.mocks["package_bios"].assert_not_called()
         self.assertEqual(
@@ -437,7 +440,7 @@ class TargetPreCheckTests(CliFixture):
         )
 
     def test_new_bios_with_published_mmc_uploads_only_bios(self) -> None:
-        self.published = {self.MMC: "mmc-meta"}
+        self.published = {self.MMC: self.MMC_META}
         self.assertEqual(cli.main([*self.common, "--upload"]), 0)
         self.mocks["package_bios"].assert_called_once()
         self.mocks["package_mmc_fw"].assert_not_called()
@@ -446,7 +449,7 @@ class TargetPreCheckTests(CliFixture):
         )
 
     def test_dry_run_with_published_bios_reports_without_downloading(self) -> None:
-        self.published = {self.BIOS: "bios-meta"}
+        self.published = {self.BIOS: self.BIOS_META}
         self.assertEqual(cli.main([*self.common, "--upload", "--dry-run"]), 0)
         self.remote.obtain.assert_not_called()
         self.mocks["package_bios"].assert_not_called()
@@ -471,7 +474,7 @@ class TargetPreCheckTests(CliFixture):
 
     def test_mmc_subcommand_skips_published_mmc_and_uploads_only_bios(self) -> None:
         existing = self.root / "0040.D70.7z"
-        self.published = {self.MMC: "mmc-meta"}
+        self.published = {self.MMC: self.MMC_META}
         self.assertEqual(cli.main(
             ["mmc", *self.common, "--bios-archive", str(existing), "--upload"]
         ), 0)

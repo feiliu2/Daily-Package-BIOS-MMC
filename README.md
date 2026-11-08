@@ -231,6 +231,55 @@ output. This includes:
 The exit code is `0` on success and `1` on any packaging or upload failure. Upload
 failures keep the verified local archives.
 
+## Machine-readable result (`--result-json`)
+
+Every command accepts `--result-json PATH`. Automation should read this file
+instead of parsing the log. It is written atomically on success **and** on failure.
+It is not written when the command line itself is invalid (argparse exits with
+code 2 before running).
+
+```json
+{
+  "schema_version": 1,
+  "command": "all",
+  "status": "success",
+  "exit_code": 0,
+  "dry_run": false,
+  "error": null,
+  "started_at": "2026-11-08T12:46:01+00:00",
+  "finished_at": "2026-11-08T12:56:29+00:00",
+  "bios_id": "0040D90",
+  "mmc_version": "0.1027.0",
+  "upload_target": "https://af01p-sc.devtools.intel.com/artifactory/DEG-IFWI-LOCAL",
+  "bios": {
+    "name": "0040.D90.7z", "path": "/out/bios/0040.D90.7z",
+    "sha256": "74e4dd4f…", "size": 696456137,
+    "packaging": "packaged", "upload": "uploaded", "skipped": false,
+    "remote_url": "https://…/DEG-IFWI-LOCAL/FIV_Portal/IFWI_CI/BIOSID/0040.D90.7z"
+  },
+  "mmc": {
+    "name": "MMCFW_0.1027.0.7z", "path": null,
+    "sha256": "4644fcb3…", "size": 21692334,
+    "packaging": "skipped_published", "upload": "skipped_published", "skipped": true,
+    "remote_url": "https://…/DEG-IFWI-LOCAL/FIV_Portal/IFWI_CI/MMC/MMCFW_0.1027.0.7z"
+  }
+}
+```
+
+| Field | Values |
+|---|---|
+| `status` / `exit_code` | `success` / `0`, or `failed` / `1`; `error` holds the first line of the failure |
+| `bios_id`, `mmc_version` | `null` until known (for example, no MMC version on a `--dry-run` or before BIOS exists) |
+| `upload_target` | Set when an upload or target check is involved; otherwise `null` |
+| `packaging` | `packaged`, `skipped_published` (already in the target, not rebuilt), `provided` (given with `--bios-archive`/`--mmc-archive`), `planned` (`--dry-run`), `not_run` |
+| `upload` | `uploaded`, `already_present` (identical file found by the upload preflight), `skipped_published`, `preview` (`--dry-run`), `not_requested`, `failed`, `not_run` |
+| `skipped` | `true` when the archive was already published and was neither rebuilt nor uploaded |
+| `path` | Absolute local path, or `null` when there is no local file (for example, a skipped MMC) |
+| `sha256`, `size` | Of the local file; for a skipped archive, of the published file. `null` for `--dry-run` |
+
+SHA-256 is computed only when `--result-json` is given, so normal runs are not
+slowed down. If the result file cannot be written, the run exits with `1`.
+
 ## Scheduling
 
 Scheduling is outside the scope of this tool. `Register-BiosPackagingTask.ps1` still

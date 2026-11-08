@@ -26,6 +26,7 @@ from .bios import package_bios
 from .fsutil import ensure_output_dir, find_seven_zip
 from .mapping import DEFAULT_MAPPING_REF, GITHUB_TOKEN_ENV, default_mapping_url, load_mapping
 from .mmc import package_mmc_fw, read_mmc_version
+from .report import RunReport
 from .upload import (
     DEFAULT_BIOS_PATH, DEFAULT_MMC_PATH, DEFAULT_UPLOAD_URL, TOKEN_ENV,
     TargetRepository, UploadTarget, optional_token, parse_upload_target,
@@ -73,6 +74,11 @@ def configure_logging(log_dir: Path) -> None:
 
 def add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--log-dir", type=Path, default=DEFAULT_LOG_DIR)
+    parser.add_argument(
+        "--result-json", type=Path, metavar="PATH",
+        help="Write a machine-readable result (BIOS ID, MMC version, archive paths, "
+             "SHA-256, skipped/uploaded status) to PATH, on success and on failure.",
+    )
     parser.add_argument(
         "--ca-bundle", type=Path,
         help="PEM CA bundle for HTTPS (default: system store / SSL_CERT_FILE).",
@@ -287,21 +293,35 @@ def package_bios_step(
     )
 
 
-def bios_step(args: argparse.Namespace, context: Context) -> Path:
+def record_bios(args: argparse.Namespace, report: RunReport, path: Path) -> None:
+    if args.dry_run:
+        report.planned(report.bios, path)
+    else:
+        report.local_file(report.bios, path, "packaged")
+
+
+def bios_step(args: argparse.Namespace, context: Context, report: RunReport) -> Path:
     build, branch_url = select_build_step(args, context)
-    return package_bios_step(args, context, build, branch_url)
+    report.bios_id = build.bios_id
+    path = package_bios_step(args, context, build, branch_url)
+    record_bios(args, report, path)
+    return path
 
 
 def mmc_step(
     args: argparse.Namespace, context: Context, bios_archive: Path,
-    remote: TargetRepository | None = None,
+    report: RunReport, remote: TargetRepository | None = None,
 ) -> Path | None:
     """Package the matching MMC; None when the target already has it."""
     version = read_mmc_version(bios_archive.resolve(), context.seven_zip)
-    if remote is not None and remote.stat("MMC", f"MMCFW_{version}.7z"):
+    report.mmc_version = version
+    report.mmc.name = f"MMCFW_{version}.7z"
+    published = remote.stat("MMC", report.mmc.name) if remote is not None else None
+    if published:
         LOGGER.info("MMC %s is already published; not repackaging it.", version)
+        report.published(report.mmc, published)
         return None
-    return package_mmc_fw(
+    path = package_mmc_fw(
         bios_archive,
         branch_url=branch_url_for(args.mmc_base_url, args.mmc_branch, "--mmc-branch"),
         output_dir=context.output_dir,
@@ -310,21 +330,59 @@ def mmc_step(
         dry_run=args.dry_run,
         version=version,
     )
+    if args.dry_run:
+        report.planned(report.mmc, path)
+    else:
+        report.local_file(report.mmc, path, "packaged")
+    return path
+
+
+def record_upload(
+    report: RunReport, results: dict[str, dict[str, str]], failed: bool = False,
+) -> None:
+    for kind, artifact in (("BIOS", report.bios), ("MMC", report.mmc)):
+        if artifact.skipped:
+            continue
+        outcome = results.get(kind)
+        if outcome is None:
+            artifact.upload = "failed" if failed else artifact.upload
+            continue
+        artifact.remote_url = outcome["url"]
+        uploaded = outcome["upload"] in ("uploaded", "already_present")
+        artifact.upload = "failed" if failed and not uploaded else outcome["upload"]
+
+
+def mark_not_requested(report: RunReport) -> None:
+    for artifact in (report.bios, report.mmc):
+        if artifact.upload == "not_run" and artifact.name:
+            artifact.upload = "not_requested"
 
 
 def upload_step(
-    args: argparse.Namespace, bios_archive: Path | None, mmc_archive: Path | None,
+    args: argparse.Namespace, report: RunReport,
+    bios_archive: Path | None, mmc_archive: Path | None,
 ) -> int:
-    if not args.upload or args.dry_run:
+    if not args.upload:
+        mark_not_requested(report)
+        return 0
+    if args.dry_run:
+        for artifact in (report.bios, report.mmc):
+            if not artifact.skipped and artifact.name:
+                artifact.upload = "preview"
         return 0
     if bios_archive is None and mmc_archive is None:
         LOGGER.info("BIOS and MMC are both already published; nothing to upload.")
         return 0
+    results: dict[str, dict[str, str]] = {}
     try:
         upload_archives(
-            bios_archive, mmc_archive, target=upload_target(args), ca_bundle=args.ca_bundle,
+            bios_archive, mmc_archive, target=upload_target(args),
+            ca_bundle=args.ca_bundle, results=results,
         )
-    except HANDLED_ERRORS:
+        record_upload(report, results)
+    except HANDLED_ERRORS as error:
+        report.fail(error)
+        record_upload(report, results, failed=True)
         LOGGER.exception(
             "Artifactory upload failed; verified local BIOS/MMC archives are retained. "
             f"Retry with: {PROG} upload --bios-archive %s --mmc-archive %s",
@@ -336,16 +394,20 @@ def upload_step(
 
 # --- Subcommand runners ---------------------------------------------------------
 
-def run_all(args: argparse.Namespace) -> int:
+def run_all(args: argparse.Namespace, report: RunReport) -> int:
     try:
         context = prepare(args)
         # With --upload, check the destination first (this also fails fast when
         # the token is missing) so already-published archives are not rebuilt.
         remote = connect_target(args) if args.upload else None
+        if remote is not None:
+            report.upload_target = f"{remote.target.root}/{remote.target.repository}"
         build, branch_url = select_build_step(args, context)
+        report.bios_id = build.bios_id
         published = remote.stat("BIOS", build.package_name) if remote else None
         if published is not None:
             LOGGER.info("BIOS %s is already published; not repackaging it.", build.bios_id)
+            report.published(report.bios, published)
             if args.dry_run:
                 LOGGER.info(
                     "Dry run; the published BIOS would be reused (local copy if "
@@ -353,57 +415,82 @@ def run_all(args: argparse.Namespace) -> int:
                 )
                 return 0
             bios_archive = remote.obtain(published, context.output_dir / build.package_name)
+            report.bios.path = str(bios_archive.resolve())
         else:
             bios_archive = package_bios_step(args, context, build, branch_url)
+            record_bios(args, report, bios_archive)
             if args.dry_run:
                 LOGGER.info(
                     "MMC version will be read after BIOS packaging; "
                     "no version or MMC build was guessed."
                 )
+                upload_step(args, report, None, None)
                 return 0
-        mmc_archive = mmc_step(args, context, bios_archive, remote)
-    except HANDLED_ERRORS:
+        mmc_archive = mmc_step(args, context, bios_archive, report, remote)
+    except HANDLED_ERRORS as error:
+        report.fail(error)
         LOGGER.exception("BIOS/MMC packaging failed.")
         return 1
-    return upload_step(args, None if published else bios_archive, mmc_archive)
+    return upload_step(args, report, None if published else bios_archive, mmc_archive)
 
 
-def run_bios(args: argparse.Namespace) -> int:
+def run_bios(args: argparse.Namespace, report: RunReport) -> int:
     try:
-        bios_step(args, prepare(args))
-    except HANDLED_ERRORS:
+        bios_step(args, prepare(args), report)
+    except HANDLED_ERRORS as error:
+        report.fail(error)
         LOGGER.exception("BIOS packaging failed.")
         return 1
     return 0
 
 
-def run_mmc(args: argparse.Namespace) -> int:
+def record_bios_id(report: RunReport, archive: Path) -> None:
+    try:
+        report.bios_id = parse_bios_id(archive.name.removesuffix(".7z")).bios_id
+    except ValueError:
+        report.bios_id = None
+
+
+def run_mmc(args: argparse.Namespace, report: RunReport) -> int:
     try:
         context = prepare(args)
         remote = connect_target(args) if args.upload else None
-        mmc_archive = mmc_step(args, context, args.bios_archive, remote)
-    except HANDLED_ERRORS:
+        if remote is not None:
+            report.upload_target = f"{remote.target.root}/{remote.target.repository}"
+        record_bios_id(report, args.bios_archive)
+        report.local_file(report.bios, args.bios_archive, "provided")
+        mmc_archive = mmc_step(args, context, args.bios_archive, report, remote)
+    except HANDLED_ERRORS as error:
+        report.fail(error)
         LOGGER.exception("MMC packaging failed.")
         return 1
-    return upload_step(args, args.bios_archive, mmc_archive)
+    return upload_step(args, report, args.bios_archive, mmc_archive)
 
 
-def run_upload(args: argparse.Namespace) -> int:
+def run_upload(args: argparse.Namespace, report: RunReport) -> int:
+    results: dict[str, dict[str, str]] = {}
     try:
+        target = upload_target(args)
+        report.upload_target = f"{target.root}/{target.repository}"
         bios, mmc = select_archives(args.source_dir, args.bios_archive, args.mmc_archive)
+        record_bios_id(report, bios)
+        report.local_file(report.bios, bios, "provided")
+        report.local_file(report.mmc, mmc, "provided")
         upload_archives(
-            bios, mmc, target=upload_target(args), dry_run=args.dry_run,
-            ca_bundle=args.ca_bundle,
+            bios, mmc, target=target, dry_run=args.dry_run,
+            ca_bundle=args.ca_bundle, results=results,
         )
-    except HANDLED_ERRORS:
+        record_upload(report, results)
+    except HANDLED_ERRORS as error:
+        report.fail(error)
+        record_upload(report, results, failed=True)
         LOGGER.exception("Artifactory upload failed; local archives retained.")
         return 1
     return 0
 
 
-SUBCOMMANDS: dict[
-    str, tuple[Callable[[], argparse.ArgumentParser], Callable[[argparse.Namespace], int]]
-] = {
+Runner = Callable[[argparse.Namespace, RunReport], int]
+SUBCOMMANDS: dict[str, tuple[Callable[[], argparse.ArgumentParser], Runner]] = {
     "bios": (bios_parser, run_bios),
     "mmc": (mmc_parser, run_mmc),
     "upload": (upload_parser, run_upload),
@@ -413,10 +500,21 @@ SUBCOMMANDS: dict[
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     if arguments and arguments[0] in SUBCOMMANDS:
-        make_parser, runner = SUBCOMMANDS[arguments[0]]
+        command = arguments[0]
+        make_parser, runner = SUBCOMMANDS[command]
         arguments = arguments[1:]
     else:
-        make_parser, runner = all_parser, run_all
+        command, make_parser, runner = "all", all_parser, run_all
     args = make_parser().parse_args(arguments)
     configure_logging(args.log_dir)
-    return runner(args)
+    report = RunReport(command, output=args.result_json, dry_run=args.dry_run)
+    exit_code = 1
+    try:
+        exit_code = runner(args, report)
+    finally:
+        try:
+            report.finish(exit_code)
+        except OSError:
+            LOGGER.exception("Could not write --result-json %s", args.result_json)
+            exit_code = 1
+    return exit_code

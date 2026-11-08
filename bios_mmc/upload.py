@@ -237,12 +237,18 @@ def build_plans(
 def upload_archives(
     bios: Path | None, mmc: Path | None, *, target: UploadTarget | None = None,
     dry_run: bool = False, ca_bundle: Path | None = None,
+    results: dict[str, dict[str, str]] | None = None,
 ) -> str:
     """Upload the given BIOS and/or MMC archive; returns 'preview' or 'completed'.
 
     Either archive may be None when it is already published in the target.
+    If `results` is given, it receives per kind ("BIOS"/"MMC") the remote URL and
+    the outcome: "uploaded", "already_present" or "preview".
     """
     plans = build_plans(bios, mmc, target or parse_upload_target())
+    if results is not None:
+        for plan in plans:
+            results[plan.kind] = {"url": plan.upload_url, "upload": "preview"}
     if dry_run:
         LOGGER.info("Upload preview only; no token read and no HTTP requests made.")
         return "preview"
@@ -278,6 +284,8 @@ def upload_archives(
                 plan.kind, plan.upload_url,
             )
             skipped += 1
+            if results is not None:
+                results[plan.kind]["upload"] = "already_present"
             continue
         LOGGER.info("UPLOADING %s: %s bytes -> %s", plan.kind, plan.length, plan.upload_url)
         reader = _HashingReader(plan.file)
@@ -309,6 +317,8 @@ def upload_archives(
             plan.kind, plan.length, plan.sha256, time.monotonic() - started,
         )
         uploaded += 1
+        if results is not None:
+            results[plan.kind]["upload"] = "uploaded"
     LOGGER.info(
         "Upload summary: uploaded=%s, identical/skipped=%s, verified=%s.",
         uploaded, skipped, len(plans),
