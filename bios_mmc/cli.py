@@ -21,22 +21,28 @@ from pathlib import Path
 from urllib.error import URLError
 
 from . import LOGGER
-from .artifactory import HttpClient, parse_bios_id, select_build
+from .artifactory import BiosBuild, HttpClient, parse_bios_id, select_build
 from .bios import package_bios
 from .fsutil import ensure_output_dir, find_seven_zip
 from .mapping import DEFAULT_MAPPING_REF, GITHUB_TOKEN_ENV, default_mapping_url, load_mapping
-from .mmc import package_mmc_fw
-from .upload import TOKEN_ENV, optional_token, select_archives, upload_archives
+from .mmc import package_mmc_fw, read_mmc_version
+from .upload import (
+    DEFAULT_BIOS_PATH, DEFAULT_MMC_PATH, DEFAULT_UPLOAD_URL, TOKEN_ENV,
+    TargetRepository, UploadTarget, optional_token, parse_upload_target,
+    select_archives, upload_archives,
+)
 
 REPOSITORY_DIR = Path(__file__).resolve().parents[1]
-DEFAULT_ARTIFACTORY_URL = (
+DEFAULT_BIOS_BASE_URL = (
     "https://af01p-or.devtools.intel.com/artifactory/"
-    "server-bios-staging-local/Daily/OakStreamRp/main/"
+    "server-bios-staging-local/Daily/OakStreamRp/"
 )
-DEFAULT_MMC_ARTIFACTORY_URL = (
+DEFAULT_BIOS_BRANCH = "main"
+DEFAULT_MMC_BASE_URL = (
     "https://af01p-or.devtools.intel.com/artifactory/"
-    "server-bios-staging-local/Daily/ZCodeFW/zcode_dmr_ap_dev/"
+    "server-bios-staging-local/Daily/ZCodeFW/"
 )
+DEFAULT_MMC_BRANCH = "zcode_dmr_ap_dev"
 DEFAULT_OUTPUT_DIR = (
     Path(r"C:\LocalPath\Bios") if os.name == "nt"
     else Path.home() / "LocalPath" / "Bios"
@@ -84,7 +90,14 @@ def add_packaging(parser: argparse.ArgumentParser) -> None:
 
 def add_bios_source(parser: argparse.ArgumentParser) -> None:
     group = parser.add_argument_group("BIOS ID packaging")
-    group.add_argument("--artifactory-url", default=DEFAULT_ARTIFACTORY_URL)
+    group.add_argument(
+        "--bios-base-url", default=DEFAULT_BIOS_BASE_URL,
+        help="Artifactory folder that contains the BIOS branch folders.",
+    )
+    group.add_argument(
+        "--bios-branch", default=DEFAULT_BIOS_BRANCH,
+        help=f"BIOS branch folder under --bios-base-url (default: {DEFAULT_BIOS_BRANCH}).",
+    )
     group.add_argument(
         "--bios", help="BIOS ID to package (e.g. 0040D79); default: newest build.",
     )
@@ -109,7 +122,31 @@ def add_bios_source(parser: argparse.ArgumentParser) -> None:
 
 
 def add_mmc_source(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--mmc-artifactory-url", default=DEFAULT_MMC_ARTIFACTORY_URL)
+    group = parser.add_argument_group("MMC packaging")
+    group.add_argument(
+        "--mmc-base-url", default=DEFAULT_MMC_BASE_URL,
+        help="Artifactory folder that contains the MMC (ZCodeFW) branch folders.",
+    )
+    group.add_argument(
+        "--mmc-branch", default=DEFAULT_MMC_BRANCH,
+        help=f"MMC branch folder under --mmc-base-url (default: {DEFAULT_MMC_BRANCH}).",
+    )
+
+
+def add_upload_target(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_argument_group("upload destination")
+    group.add_argument(
+        "--upload-url", default=DEFAULT_UPLOAD_URL,
+        help="https://<host>/artifactory/<repository> to upload into.",
+    )
+    group.add_argument(
+        "--upload-bios-path", default=DEFAULT_BIOS_PATH,
+        help=f"Folder in the repository for BIOS archives (default: {DEFAULT_BIOS_PATH}).",
+    )
+    group.add_argument(
+        "--upload-mmc-path", default=DEFAULT_MMC_PATH,
+        help=f"Folder in the repository for MMC archives (default: {DEFAULT_MMC_PATH}).",
+    )
 
 
 def add_upload_flag(parser: argparse.ArgumentParser) -> None:
@@ -136,6 +173,7 @@ def all_parser() -> argparse.ArgumentParser:
     add_bios_source(parser)
     add_mmc_source(parser)
     add_upload_flag(parser)
+    add_upload_target(parser)
     add_common(parser)
     return parser
 
@@ -159,6 +197,7 @@ def mmc_parser() -> argparse.ArgumentParser:
     add_packaging(parser)
     add_mmc_source(parser)
     add_upload_flag(parser)
+    add_upload_target(parser)
     add_common(parser)
     return parser
 
@@ -175,8 +214,20 @@ def upload_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true",
         help="Show the upload plan without reading the token or contacting servers.",
     )
+    add_upload_target(parser)
     add_common(parser)
     return parser
+
+
+def branch_url_for(base_url: str, branch: str, option: str) -> str:
+    parts = [part for part in branch.split("/") if part]
+    if not parts or any(part in (".", "..") for part in parts):
+        raise ValueError(f"Invalid {option}: {branch!r}")
+    return f"{base_url.rstrip('/')}/{'/'.join(parts)}/"
+
+
+def upload_target(args: argparse.Namespace) -> UploadTarget:
+    return parse_upload_target(args.upload_url, args.upload_bios_path, args.upload_mmc_path)
 
 
 # --- Steps ----------------------------------------------------------------------
@@ -198,21 +249,34 @@ def prepare(args: argparse.Namespace) -> Context:
     return Context(http, output_dir, seven_zip)
 
 
-def bios_step(args: argparse.Namespace, context: Context) -> Path:
+def connect_target(args: argparse.Namespace) -> TargetRepository:
+    """Open the upload destination read-only; requires the Artifactory token."""
+    return TargetRepository.connect(upload_target(args), ca_bundle=args.ca_bundle)
+
+
+def select_build_step(args: argparse.Namespace, context: Context) -> tuple[BiosBuild, str]:
     if args.jobs < 1 or args.download_retry < 1:
         raise ValueError("--jobs and --download-retry must be at least 1.")
+    branch_url = branch_url_for(args.bios_base_url, args.bios_branch, "--bios-branch")
+    LOGGER.info("Querying Artifactory: %s", branch_url)
+    requested = parse_bios_id(args.bios) if args.bios else None
+    build = select_build(context.http.get_text(branch_url), requested)
+    LOGGER.info("Selected BIOS %s (%s).", build.bios_id, build.package_name)
+    return build, branch_url
+
+
+def package_bios_step(
+    args: argparse.Namespace, context: Context, build: BiosBuild, branch_url: str,
+) -> Path:
     components = load_mapping(
         local_path=args.mapping_xlsx,
         url=args.mapping_url or default_mapping_url(args.mapping_ref),
         token=os.environ.get(GITHUB_TOKEN_ENV),
         http=context.http,
     )
-    LOGGER.info("Querying Artifactory: %s", args.artifactory_url)
-    requested = parse_bios_id(args.bios) if args.bios else None
-    build = select_build(context.http.get_text(args.artifactory_url), requested)
     return package_bios(
         build,
-        build_url=f"{args.artifactory_url.rstrip('/')}/{build.directory_name}/",
+        build_url=f"{branch_url}{build.directory_name}/",
         components=components,
         output_dir=context.output_dir,
         http=context.http,
@@ -223,22 +287,43 @@ def bios_step(args: argparse.Namespace, context: Context) -> Path:
     )
 
 
-def mmc_step(args: argparse.Namespace, context: Context, bios_archive: Path) -> Path:
+def bios_step(args: argparse.Namespace, context: Context) -> Path:
+    build, branch_url = select_build_step(args, context)
+    return package_bios_step(args, context, build, branch_url)
+
+
+def mmc_step(
+    args: argparse.Namespace, context: Context, bios_archive: Path,
+    remote: TargetRepository | None = None,
+) -> Path | None:
+    """Package the matching MMC; None when the target already has it."""
+    version = read_mmc_version(bios_archive.resolve(), context.seven_zip)
+    if remote is not None and remote.stat("MMC", f"MMCFW_{version}.7z"):
+        LOGGER.info("MMC %s is already published; not repackaging it.", version)
+        return None
     return package_mmc_fw(
         bios_archive,
-        artifactory_url=args.mmc_artifactory_url,
+        branch_url=branch_url_for(args.mmc_base_url, args.mmc_branch, "--mmc-branch"),
         output_dir=context.output_dir,
         http=context.http,
         seven_zip=context.seven_zip,
         dry_run=args.dry_run,
+        version=version,
     )
 
 
-def upload_step(args: argparse.Namespace, bios_archive: Path, mmc_archive: Path) -> int:
+def upload_step(
+    args: argparse.Namespace, bios_archive: Path | None, mmc_archive: Path | None,
+) -> int:
     if not args.upload or args.dry_run:
         return 0
+    if bios_archive is None and mmc_archive is None:
+        LOGGER.info("BIOS and MMC are both already published; nothing to upload.")
+        return 0
     try:
-        upload_archives(bios_archive, mmc_archive, ca_bundle=args.ca_bundle)
+        upload_archives(
+            bios_archive, mmc_archive, target=upload_target(args), ca_bundle=args.ca_bundle,
+        )
     except HANDLED_ERRORS:
         LOGGER.exception(
             "Artifactory upload failed; verified local BIOS/MMC archives are retained. "
@@ -254,18 +339,33 @@ def upload_step(args: argparse.Namespace, bios_archive: Path, mmc_archive: Path)
 def run_all(args: argparse.Namespace) -> int:
     try:
         context = prepare(args)
-        bios_archive = bios_step(args, context)
-        if args.dry_run:
-            LOGGER.info(
-                "MMC version will be read after BIOS packaging; "
-                "no version or MMC build was guessed."
-            )
-            return 0
-        mmc_archive = mmc_step(args, context, bios_archive)
+        # With --upload, check the destination first (this also fails fast when
+        # the token is missing) so already-published archives are not rebuilt.
+        remote = connect_target(args) if args.upload else None
+        build, branch_url = select_build_step(args, context)
+        published = remote.stat("BIOS", build.package_name) if remote else None
+        if published is not None:
+            LOGGER.info("BIOS %s is already published; not repackaging it.", build.bios_id)
+            if args.dry_run:
+                LOGGER.info(
+                    "Dry run; the published BIOS would be reused (local copy if "
+                    "identical, otherwise downloaded) to check its MMC."
+                )
+                return 0
+            bios_archive = remote.obtain(published, context.output_dir / build.package_name)
+        else:
+            bios_archive = package_bios_step(args, context, build, branch_url)
+            if args.dry_run:
+                LOGGER.info(
+                    "MMC version will be read after BIOS packaging; "
+                    "no version or MMC build was guessed."
+                )
+                return 0
+        mmc_archive = mmc_step(args, context, bios_archive, remote)
     except HANDLED_ERRORS:
         LOGGER.exception("BIOS/MMC packaging failed.")
         return 1
-    return upload_step(args, bios_archive, mmc_archive)
+    return upload_step(args, None if published else bios_archive, mmc_archive)
 
 
 def run_bios(args: argparse.Namespace) -> int:
@@ -279,7 +379,9 @@ def run_bios(args: argparse.Namespace) -> int:
 
 def run_mmc(args: argparse.Namespace) -> int:
     try:
-        mmc_archive = mmc_step(args, prepare(args), args.bios_archive)
+        context = prepare(args)
+        remote = connect_target(args) if args.upload else None
+        mmc_archive = mmc_step(args, context, args.bios_archive, remote)
     except HANDLED_ERRORS:
         LOGGER.exception("MMC packaging failed.")
         return 1
@@ -289,7 +391,10 @@ def run_mmc(args: argparse.Namespace) -> int:
 def run_upload(args: argparse.Namespace) -> int:
     try:
         bios, mmc = select_archives(args.source_dir, args.bios_archive, args.mmc_archive)
-        upload_archives(bios, mmc, dry_run=args.dry_run, ca_bundle=args.ca_bundle)
+        upload_archives(
+            bios, mmc, target=upload_target(args), dry_run=args.dry_run,
+            ca_bundle=args.ca_bundle,
+        )
     except HANDLED_ERRORS:
         LOGGER.exception("Artifactory upload failed; local archives retained.")
         return 1

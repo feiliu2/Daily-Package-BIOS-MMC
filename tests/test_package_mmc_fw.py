@@ -15,7 +15,8 @@ from bios_mmc.fsutil import ArchiveEntry
 
 VERSION = "0.1022.0"
 SOURCE_NAME = "ZCodeFW_test_DMR_ZCODE_DebugSigned_linux_309_BuildPkg.7z"
-BASE_URL = "https://example.test/mmc/"
+BASE_URL = "https://example.test/mmc/"  # branch folder
+VERSION_URL = BASE_URL + f"MMC_FW.DMR_AP.{VERSION}/"
 DIRECTORY_URL = BASE_URL + f"MMC_FW.DMR_AP.{VERSION}/DMR_ZCODE_DebugSigned_linux/"
 BIN_NAME = f"mmc_pkg_{VERSION}_00_sign-test_unencrypted_dmr-ap.bin"
 
@@ -70,6 +71,31 @@ class MmcVersionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "missing or empty"):
             mmc.read_mmc_version(self.bios, Path("7z"))
         run.assert_not_called()
+
+
+class MmcVersionFolderTests(unittest.TestCase):
+    def test_prefixed_and_plain_version_folders_are_found(self) -> None:
+        for folder in (f"MMC_FW.DMR_AP.{VERSION}/", f"MMC_FW.{VERSION}/"):
+            with self.subTest(folder=folder):
+                html = index_page("../", folder, "MMC_FW.DMR_AP.0.1024.0/", "SNCU.1/")
+                self.assertEqual(
+                    mmc.select_mmc_version_dir(html, BASE_URL, VERSION), BASE_URL + folder
+                )
+
+    def test_other_versions_and_files_never_match(self) -> None:
+        for html in (
+            index_page("MMC_FW.DMR_AP.0.1022.01/", "MMC_FW.1.0.1022.0/",
+                       f"MMC_FW.DMR_AP.{VERSION}", "MMC_FW.DMR_AP.0x1022x0/"),
+            "<html>Please sign in</html>",
+        ):
+            with self.subTest(html=html):
+                with self.assertRaisesRegex(ValueError, "found 0"):
+                    mmc.select_mmc_version_dir(html, BASE_URL, VERSION)
+
+    def test_ambiguous_version_folders_fail(self) -> None:
+        html = index_page(f"MMC_FW.DMR_AP.{VERSION}/", f"MMC_FW.{VERSION}/")
+        with self.assertRaisesRegex(ValueError, "found 2"):
+            mmc.select_mmc_version_dir(html, BASE_URL, VERSION)
 
 
 class MmcSourceTests(unittest.TestCase):
@@ -189,7 +215,13 @@ class MmcPackagingTests(unittest.TestCase):
             f"mmc_pkg_{VERSION}_loose.bin": b"must not be mixed into binaries",
         })
         self.http = mock.Mock(spec=artifactory.HttpClient)
-        self.http.get_text.return_value = index_page(SOURCE_NAME, "loose.bin")
+        self.http.get_text.side_effect = lambda url: {
+            BASE_URL: index_page(
+                f"MMC_FW.DMR_AP.{VERSION}/", "MMC_FW.DMR_AP.0.1024.0/", "SNCU.26450200/"
+            ),
+            VERSION_URL: index_page("DMR_ZCODE/", "DMR_ZCODE_DebugSigned_linux/"),
+            DIRECTORY_URL: index_page(SOURCE_NAME, "loose.bin"),
+        }[url]
         self.http.download.side_effect = (
             lambda url, destination: shutil.copyfile(self.source, destination)
         )
@@ -206,7 +238,7 @@ class MmcPackagingTests(unittest.TestCase):
     def package(self, *, dry_run: bool = False) -> Path:
         return mmc.package_mmc_fw(
             self.bios,
-            artifactory_url=BASE_URL,
+            branch_url=BASE_URL,
             output_dir=self.output,
             http=self.http,
             seven_zip=self.seven_zip,
@@ -223,7 +255,9 @@ class MmcPackagingTests(unittest.TestCase):
         destination = self.package()
         self.assertEqual(destination.name, f"MMCFW_{VERSION}.7z")
         self.assert_bios_and_outputs(destination.name)
-        self.http.get_text.assert_called_once_with(DIRECTORY_URL)
+        self.assertEqual(
+            [c.args[0] for c in self.http.get_text.call_args_list], [BASE_URL, VERSION_URL, DIRECTORY_URL]
+        )
         self.assertEqual(self.http.download.call_args.args[0], DIRECTORY_URL + SOURCE_NAME)
         unpacked = self.root / "verified result"
         fsutil.extract_archive(destination, unpacked, self.seven_zip)
@@ -238,6 +272,17 @@ class MmcPackagingTests(unittest.TestCase):
             {"binaries"},
         )
 
+    def test_version_without_debug_signed_build_fails_clearly(self) -> None:
+        pages = {
+            BASE_URL: index_page(f"MMC_FW.{VERSION}/"),
+            BASE_URL + f"MMC_FW.{VERSION}/": index_page("PinFile.xml", "DiffPinfile.json"),
+        }
+        self.http.get_text.side_effect = lambda url: pages[url]
+        with self.assertRaisesRegex(ValueError, "has no DMR_ZCODE_DebugSigned_linux/ build"):
+            self.package()
+        self.http.download.assert_not_called()
+        self.assert_bios_and_outputs()
+
     def test_existing_mmc_is_replaced_only_after_validation(self) -> None:
         destination = self.output / f"MMCFW_{VERSION}.7z"
         destination.write_bytes(b"old MMC")
@@ -248,7 +293,9 @@ class MmcPackagingTests(unittest.TestCase):
     def test_dry_run_reads_exact_version_without_download_or_workspace(self) -> None:
         destination = self.package(dry_run=True)
         self.assertEqual(destination.name, f"MMCFW_{VERSION}.7z")
-        self.http.get_text.assert_called_once_with(DIRECTORY_URL)
+        self.assertEqual(
+            [c.args[0] for c in self.http.get_text.call_args_list], [BASE_URL, VERSION_URL, DIRECTORY_URL]
+        )
         self.http.download.assert_not_called()
         self.assert_bios_and_outputs()
 

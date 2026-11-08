@@ -85,7 +85,10 @@ Useful options:
 | `--mapping-xlsx` | — | Use a local `biosid_oak_ap.xlsx`; no GitHub access |
 | `--jobs` | CPU count | Parallel component downloads/extractions |
 | `--download-retry` | 3 | Attempts per component download + extraction |
-| `--artifactory-url`, `--mmc-artifactory-url` | project defaults | Source indexes |
+| `--bios-branch` | `main` | BIOS branch folder (`main`, `dmr_ap1_b0_po_platform`, `oks_milestone_rel`, ...) |
+| `--bios-base-url` | `.../Daily/OakStreamRp/` | Folder containing the BIOS branch folders |
+| `--mmc-branch` | `zcode_dmr_ap_dev` | MMC branch folder (`zcode_dmr_ap1_beta_rel`, `zcode_dev`, ...) |
+| `--mmc-base-url` | `.../Daily/ZCodeFW/` | Folder containing the MMC branch folders |
 | `--seven-zip`, `--ca-bundle`, `--log-dir` | auto / system / `logs` | Tools and diagnostics |
 | `--upload` | off | Upload both archives after successful packaging |
 
@@ -100,6 +103,21 @@ To package only MMC for an existing BIOS archive (no mapping or BIOS download):
 ```bash
 python3 main.py mmc --bios-archive ~/LocalPath/Bios/0040.D79.7z
 ```
+
+### Branches
+
+Both sources are organized by branch on Artifactory. `--bios-branch` and
+`--mmc-branch` select the folder under `--bios-base-url` and `--mmc-base-url`.
+
+- **BIOS:** builds are `OAKSTRM.0.RPB.<release>.D.<rev>/` on every branch; the
+  newest is chosen numerically within the selected branch.
+- **MMC:** the version folder is named differently per branch
+  (`MMC_FW.DMR_AP.0.999.0/` on `zcode_dmr_ap_dev`, `MMC_FW.0.915.2/` on
+  `zcode_dmr_ap1_beta_rel`). Exactly one `MMC_FW.[<prefix>.]<version>/` folder must
+  match, then `DMR_ZCODE_DebugSigned_linux/*_BuildPkg.7z` is used.
+- **Mapping:** `biosid_oak_ap.xlsx` describes the component folders of the
+  `main` BIOS builds. Other BIOS branches may need a matching `--mapping-ref` or
+  `--mapping-xlsx`.
 
 ### How the BIOS package is built
 
@@ -155,9 +173,16 @@ python3 main.py upload --bios-archive ./0040.D82.7z --mmc-archive ./MMCFW_0.1022
 Without explicit paths, the `upload` subcommand requires exactly one `NNNN.D<rev>.7z`
 and one `MMCFW_x.y.z.7z` in `--source-dir`. It never guesses between several.
 
-Archives go to
-`https://af01p-sc.devtools.intel.com/artifactory/DEG-IFWI-LOCAL/FIV_Portal/IFWI_CI/BIOSID/`
-and `.../MMC/` under their original names. The upload runs in these steps:
+Archives keep their original names. The destination is set by three options,
+accepted by the full flow, `mmc --upload` and `upload`:
+
+| Option | Default |
+|---|---|
+| `--upload-url` | `https://af01p-sc.devtools.intel.com/artifactory/DEG-IFWI-LOCAL` (`https://<host>/artifactory/<repository>`) |
+| `--upload-bios-path` | `FIV_Portal/IFWI_CI/BIOSID` |
+| `--upload-mmc-path` | `FIV_Portal/IFWI_CI/MMC` |
+
+The upload runs in these steps:
 
 1. Compute SHA-256 for both files. `--dry-run` stops here and reads no token.
 2. Read `IFWI_ARTIFACTORY_TOKEN`. If it is missing or malformed, fail before any request.
@@ -170,6 +195,27 @@ and `.../MMC/` under their original names. The upload runs in these steps:
    SHA-256.
 
 Re-running the upload retries safely; files that are already identical are skipped.
+
+### Target pre-check (`--upload` in the full flow and `mmc`)
+
+Repackaging identical content produces a different archive SHA-256, because 7-Zip
+stores file modification times. Without a pre-check, rebuilding a version that is
+already published would waste a full rebuild and then fail the upload with
+"Refusing to overwrite". So, when `--upload` is given, the destination is checked
+**before** packaging:
+
+| Target already has | What happens |
+|---|---|
+| Neither archive | Package BIOS and MMC, upload both |
+| `<release>.D<rev>.7z` | BIOS is not repackaged. A local copy whose SHA-256 matches the published one is reused; otherwise the published file is downloaded and verified. Its MMC version is then read. |
+| `MMCFW_<version>.7z` | MMC is not repackaged or uploaded |
+| Both | Nothing is packaged or uploaded; exit 0 |
+
+- The pre-check reads `IFWI_ARTIFACTORY_TOKEN`, so a missing token now fails before
+  any packaging work.
+- With `--dry-run --upload`, the BIOS check is reported but nothing is downloaded.
+- Without `--upload`, the target is never contacted and packaging runs as before.
+- The `upload` subcommand is unchanged: it uploads the files it is given.
 
 ## Logs and exit codes
 

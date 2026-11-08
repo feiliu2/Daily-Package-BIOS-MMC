@@ -118,7 +118,9 @@ class OutputDirectoryTests(unittest.TestCase):
                 fsutil.ensure_output_dir(link)
 
 
-class OrchestrationTests(unittest.TestCase):
+class CliFixture(unittest.TestCase):
+    """Shared mocks for CLI orchestration tests (defines no tests itself)."""
+
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory(prefix="cli-tests-")
         self.addCleanup(temporary.cleanup)
@@ -140,6 +142,10 @@ class OrchestrationTests(unittest.TestCase):
             "upload_archives": mock.patch.object(
                 cli, "upload_archives", return_value="completed"
             ),
+            "read_mmc_version": mock.patch.object(
+                cli, "read_mmc_version", return_value="0.1022.0"
+            ),
+            "connect_target": mock.patch.object(cli, "connect_target"),
             "get_text": mock.patch.object(
                 artifactory.HttpClient, "get_text",
                 return_value=index_page(
@@ -151,17 +157,23 @@ class OrchestrationTests(unittest.TestCase):
         for name, patcher in patches.items():
             self.mocks[name] = patcher.start()
             self.addCleanup(patcher.stop)
+        self.remote = self.mocks["connect_target"].return_value
+        self.published: dict[str, object] = {}
+        self.remote.stat.side_effect = lambda kind, name: self.published.get(name)
+        self.remote.obtain.side_effect = lambda remote, destination: destination
         environment = mock.patch.dict(os.environ, {"IFWI_GITHUB_TOKEN": "gh-token"})
         environment.start()
         self.addCleanup(environment.stop)
 
+
+class OrchestrationTests(CliFixture):
     def test_default_run_packages_newest_bios_then_mmc_without_upload(self) -> None:
         self.assertEqual(cli.main(self.common), 0)
         bios_call = self.mocks["package_bios"].call_args
         self.assertEqual(bios_call.args[0], BiosBuild("0040", "79"))
         self.assertEqual(
             bios_call.kwargs["build_url"],
-            cli.DEFAULT_ARTIFACTORY_URL + "OAKSTRM.0.RPB.0040.D.79/",
+            cli.DEFAULT_BIOS_BASE_URL + "main/OAKSTRM.0.RPB.0040.D.79/",
         )
         self.assertEqual(bios_call.kwargs["retries"], cli.DEFAULT_DOWNLOAD_RETRY)
         mapping_call = self.mocks["load_mapping"].call_args.kwargs
@@ -186,6 +198,76 @@ class OrchestrationTests(unittest.TestCase):
                 self.assertEqual(cli.main(self.common), 1)
         self.mocks["get_text"].assert_not_called()
         self.mocks["package_bios"].assert_not_called()
+
+    def test_bios_and_mmc_branches_build_urls_under_base(self) -> None:
+        self.assertEqual(cli.main([
+            *self.common, "--bios-branch", "oks_milestone_rel",
+            "--mmc-branch", "zcode_dmr_ap1_beta_rel",
+            "--mmc-base-url", "https://mirror.test/ZCodeFW",
+        ]), 0)
+        self.assertEqual(
+            self.mocks["get_text"].call_args.args[0],
+            cli.DEFAULT_BIOS_BASE_URL + "oks_milestone_rel/",
+        )
+        self.assertEqual(
+            self.mocks["package_bios"].call_args.kwargs["build_url"],
+            cli.DEFAULT_BIOS_BASE_URL + "oks_milestone_rel/OAKSTRM.0.RPB.0040.D.79/",
+        )
+        self.assertEqual(
+            self.mocks["package_mmc_fw"].call_args.kwargs["branch_url"],
+            "https://mirror.test/ZCodeFW/zcode_dmr_ap1_beta_rel/",
+        )
+
+    def test_default_mmc_branch(self) -> None:
+        self.assertEqual(cli.main(self.common), 0)
+        self.assertEqual(
+            self.mocks["package_mmc_fw"].call_args.kwargs["branch_url"],
+            cli.DEFAULT_MMC_BASE_URL + "zcode_dmr_ap_dev/",
+        )
+
+    def test_invalid_branch_fails_before_packaging(self) -> None:
+        with self.assertLogs("bios_packager", level="ERROR") as logged:
+            self.assertEqual(cli.main([*self.common, "--bios-branch", "../x"]), 1)
+        self.assertIn("--bios-branch", "\n".join(logged.output))
+        self.mocks["package_bios"].assert_not_called()
+
+    def test_upload_destination_options_reach_every_upload_path(self) -> None:
+        destination = [
+            "--upload-url", "https://up.test/artifactory/REPO",
+            "--upload-bios-path", "B/ios", "--upload-mmc-path", "M/mc",
+        ]
+        bios = self.root / "0040.D82.7z"
+        mmc = self.root / "MMCFW_0.1022.0.7z"
+        bios.write_bytes(b"b")
+        mmc.write_bytes(b"m")
+        for arguments in (
+            [*self.common, "--upload"],
+            ["mmc", *self.common, "--bios-archive", str(bios), "--upload"],
+            ["upload", "--bios-archive", str(bios), "--mmc-archive", str(mmc),
+             "--log-dir", str(self.root / "logs")],
+        ):
+            with self.subTest(arguments=arguments[:1]):
+                self.mocks["upload_archives"].reset_mock()
+                self.assertEqual(cli.main([*arguments, *destination]), 0)
+                target = self.mocks["upload_archives"].call_args.kwargs["target"]
+                self.assertEqual(
+                    (target.root, target.repository, target.bios_folder, target.mmc_folder),
+                    ("https://up.test/artifactory", "REPO", "B/ios", "M/mc"),
+                )
+
+    def test_default_upload_destination(self) -> None:
+        self.assertEqual(cli.main([*self.common, "--upload"]), 0)
+        target = self.mocks["upload_archives"].call_args.kwargs["target"]
+        self.assertEqual(target.repository, "DEG-IFWI-LOCAL")
+        self.assertEqual(target.bios_folder, "FIV_Portal/IFWI_CI/BIOSID")
+
+    def test_bad_upload_url_is_reported_without_uploading(self) -> None:
+        with self.assertLogs("bios_packager", level="ERROR") as logged:
+            self.assertEqual(
+                cli.main([*self.common, "--upload", "--upload-url", "https://x/REPO"]), 1
+            )
+        self.assertIn("--upload-url", "\n".join(logged.output))
+        self.mocks["upload_archives"].assert_not_called()
 
     def test_explicit_bios_ref_and_local_mapping_are_forwarded(self) -> None:
         xlsx = self.root / "map.xlsx"
@@ -255,6 +337,10 @@ class OrchestrationTests(unittest.TestCase):
             ["bios", "--upload"], ["bios", "--bios-archive", "x.7z"],
             ["mmc", "--bios-archive", "x.7z", "--mapping-ref", "dev"],
             ["--bios-archive", "x.7z"],
+            ["bios", "--upload-url", "https://x/artifactory/R"],
+            ["mmc", "--bios-archive", "x.7z", "--bios-branch", "main"],
+            ["bios", "--mmc-branch", "x"],
+            ["--artifactory-url", "https://old"],
         ):
             with self.subTest(arguments=arguments):
                 with self.assertRaises(SystemExit), mock.patch("sys.stderr"):
@@ -300,6 +386,103 @@ class OrchestrationTests(unittest.TestCase):
         self.assertEqual(call.args, (bios.resolve(), mmc.resolve()))
         self.assertTrue(call.kwargs["dry_run"])
         self.mocks["package_bios"].assert_not_called()
+
+
+class TargetPreCheckTests(CliFixture):
+    """Pre-check of the upload destination before packaging (--upload only)."""
+
+    BIOS = "0040.D79.7z"
+    MMC = "MMCFW_0.1022.0.7z"
+
+    def test_without_upload_the_target_is_never_contacted(self) -> None:
+        self.assertEqual(cli.main(self.common), 0)
+        self.mocks["connect_target"].assert_not_called()
+        self.mocks["package_bios"].assert_called_once()
+
+    def test_nothing_published_packages_and_uploads_both(self) -> None:
+        self.assertEqual(cli.main([*self.common, "--upload"]), 0)
+        self.assertEqual(
+            [c.args for c in self.remote.stat.call_args_list],
+            [("BIOS", self.BIOS), ("MMC", self.MMC)],
+        )
+        self.mocks["package_bios"].assert_called_once()
+        self.mocks["package_mmc_fw"].assert_called_once()
+        self.assertEqual(
+            self.mocks["upload_archives"].call_args.args,
+            (self.output / self.BIOS, self.output / self.MMC),
+        )
+
+    def test_both_published_skips_packaging_and_upload(self) -> None:
+        self.published = {self.BIOS: "bios-meta", self.MMC: "mmc-meta"}
+        with self.assertLogs("bios_packager", level="INFO") as logged:
+            self.assertEqual(cli.main([*self.common, "--upload"]), 0)
+        self.mocks["load_mapping"].assert_not_called()
+        self.mocks["package_bios"].assert_not_called()
+        self.mocks["package_mmc_fw"].assert_not_called()
+        self.mocks["upload_archives"].assert_not_called()
+        self.remote.obtain.assert_called_once_with("bios-meta", self.output / self.BIOS)
+        self.mocks["read_mmc_version"].assert_called_once()
+        self.assertIn("both already published", "\n".join(logged.output))
+
+    def test_published_bios_missing_mmc_packages_and_uploads_only_mmc(self) -> None:
+        self.published = {self.BIOS: "bios-meta"}
+        self.assertEqual(cli.main([*self.common, "--upload"]), 0)
+        self.mocks["package_bios"].assert_not_called()
+        self.assertEqual(
+            self.mocks["package_mmc_fw"].call_args.args[0], self.output / self.BIOS
+        )
+        self.assertEqual(self.mocks["package_mmc_fw"].call_args.kwargs["version"], "0.1022.0")
+        self.assertEqual(
+            self.mocks["upload_archives"].call_args.args, (None, self.output / self.MMC)
+        )
+
+    def test_new_bios_with_published_mmc_uploads_only_bios(self) -> None:
+        self.published = {self.MMC: "mmc-meta"}
+        self.assertEqual(cli.main([*self.common, "--upload"]), 0)
+        self.mocks["package_bios"].assert_called_once()
+        self.mocks["package_mmc_fw"].assert_not_called()
+        self.assertEqual(
+            self.mocks["upload_archives"].call_args.args, (self.output / self.BIOS, None)
+        )
+
+    def test_dry_run_with_published_bios_reports_without_downloading(self) -> None:
+        self.published = {self.BIOS: "bios-meta"}
+        self.assertEqual(cli.main([*self.common, "--upload", "--dry-run"]), 0)
+        self.remote.obtain.assert_not_called()
+        self.mocks["package_bios"].assert_not_called()
+        self.mocks["upload_archives"].assert_not_called()
+
+    def test_missing_token_fails_before_any_packaging(self) -> None:
+        self.mocks["connect_target"].side_effect = ValueError(
+            "IFWI_ARTIFACTORY_TOKEN is not set"
+        )
+        with self.assertLogs("bios_packager", level="ERROR") as logged:
+            self.assertEqual(cli.main([*self.common, "--upload"]), 1)
+        self.assertIn("IFWI_ARTIFACTORY_TOKEN is not set", "\n".join(logged.output))
+        self.mocks["get_text"].assert_not_called()
+        self.mocks["package_bios"].assert_not_called()
+
+    def test_target_check_failure_stops_before_packaging(self) -> None:
+        self.remote.stat.side_effect = RuntimeError("Cannot check BIOS (HTTP 403)")
+        with self.assertLogs("bios_packager", level="ERROR"):
+            self.assertEqual(cli.main([*self.common, "--upload"]), 1)
+        self.mocks["package_bios"].assert_not_called()
+        self.mocks["upload_archives"].assert_not_called()
+
+    def test_mmc_subcommand_skips_published_mmc_and_uploads_only_bios(self) -> None:
+        existing = self.root / "0040.D70.7z"
+        self.published = {self.MMC: "mmc-meta"}
+        self.assertEqual(cli.main(
+            ["mmc", *self.common, "--bios-archive", str(existing), "--upload"]
+        ), 0)
+        self.mocks["package_mmc_fw"].assert_not_called()
+        self.assertEqual(self.mocks["upload_archives"].call_args.args, (existing, None))
+
+    def test_mmc_subcommand_without_upload_never_contacts_target(self) -> None:
+        existing = self.root / "0040.D70.7z"
+        self.assertEqual(cli.main(["mmc", *self.common, "--bios-archive", str(existing)]), 0)
+        self.mocks["connect_target"].assert_not_called()
+        self.mocks["package_mmc_fw"].assert_called_once()
 
 
 class ProcessTests(unittest.TestCase):

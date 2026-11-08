@@ -293,7 +293,7 @@
           <article class="source-card">
             <h3>BIOS · 查询最新 Build ID</h3>
             <a class="source-url" href="https://af01p-or.devtools.intel.com/artifactory/server-bios-staging-local/Daily/OakStreamRp/main/" target="_blank" rel="noopener noreferrer">https://af01p-or.devtools.intel.com/artifactory/server-bios-staging-local/Daily/OakStreamRp/main/</a>
-            <p>识别 <code>OAKSTRM.0.RPB.&lt;release&gt;.D.&lt;revision&gt;/</code>，按 release 和 revision 的数值大小选择最新版本；也可用 <code>--bios 0040D79</code> 指定版本。</p>
+            <p>识别 <code>OAKSTRM.0.RPB.&lt;release&gt;.D.&lt;revision&gt;/</code>，按 release 和 revision 的数值大小选择最新版本；也可用 <code>--bios 0040D79</code> 指定版本。默认分支 <code>main</code>，可用 <code>--bios-branch</code> 换成 <code>dmr_ap1_b0_po_platform</code>、<code>oks_milestone_rel</code> 等其他分支目录。</p>
           </article>
           <article class="source-card">
             <h3>映射 · biosid_oak_ap.xlsx</h3>
@@ -302,7 +302,7 @@
           <article class="source-card mmc">
             <h3>MMC · 查询 BIOS 指定版本</h3>
             <a class="source-url" href="https://af01p-or.devtools.intel.com/artifactory/server-bios-staging-local/Daily/ZCodeFW/zcode_dmr_ap_dev/" target="_blank" rel="noopener noreferrer">https://af01p-or.devtools.intel.com/artifactory/server-bios-staging-local/Daily/ZCodeFW/zcode_dmr_ap_dev/</a>
-            <p>进入 <code>MMC_FW.DMR_AP.&lt;version&gt;/DMR_ZCODE_DebugSigned_linux/</code>，不选择另一个更高但与 BIOS 不匹配的 MMC 版本。</p>
+            <p>默认分支 <code>zcode_dmr_ap_dev</code>，可用 <code>--mmc-branch</code> 切换。在分支中找到唯一的 <code>MMC_FW.[前缀.]&lt;version&gt;/</code> 目录（不同分支命名不同，如 <code>MMC_FW.DMR_AP.0.999.0/</code>、<code>MMC_FW.0.915.2/</code>），再进入 <code>DMR_ZCODE_DebugSigned_linux/</code>。不会选择另一个更高但与 BIOS 不匹配的 MMC 版本。</p>
           </article>
         </div>
       </section>
@@ -366,7 +366,7 @@ Archive: 0040.D79.7z</code></pre>
                 <pre><code>MMC_FW.DMR_AP.0.1022.0/
 └── DMR_ZCODE_DebugSigned_linux/
     └── *_BuildPkg.7z</code></pre>
-                <p>目录中必须恰好有一个 <code>_BuildPkg.7z</code>，不回退到其他版本。</p>
+                <p>版本目录在分支中必须恰好匹配一个（<code>MMC_FW.DMR_AP.0.1022.0/</code> 或 <code>MMC_FW.0.1022.0/</code>），其中必须恰好有一个 <code>_BuildPkg.7z</code>，不回退到其他版本。</p>
               </li>
               <li class="step">
                 <div class="step-heading"><span class="step-number" aria-hidden="true">07</span><h3>下载并只提取 binaries</h3></div>
@@ -455,6 +455,7 @@ python3 main.py upload --bios-archive ./0040.D82.7z --mmc-archive ./MMCFW_0.1022
             <h3>预检、直传、校验</h3>
             <p>BIOS → <a href="https://af01p-sc.devtools.intel.com/ui/repos/tree/General/DEG-IFWI-LOCAL/FIV_Portal/IFWI_CI/BIOSID" target="_blank" rel="noopener noreferrer">DEG-IFWI-LOCAL / FIV_Portal / IFWI_CI / BIOSID</a></p>
             <p>MMC → <a href="https://af01p-sc.devtools.intel.com/ui/repos/tree/General/DEG-IFWI-LOCAL/FIV_Portal/IFWI_CI/MMC" target="_blank" rel="noopener noreferrer">DEG-IFWI-LOCAL / FIV_Portal / IFWI_CI / MMC</a></p>
+            <p>以上为默认目标，可用 <code>--upload-url</code>（<code>https://&lt;host&gt;/artifactory/&lt;仓库&gt;</code>）、<code>--upload-bios-path</code>、<code>--upload-mmc-path</code> 修改；完整流程、<code>mmc --upload</code> 和 <code>upload</code> 都支持。</p>
             <ul>
               <li>上传和下载共用同一个 <code>IFWI_ARTIFACTORY_TOKEN</code>（FIV Ubuntu 镜像中已内置）。上传时缺失或格式不对，在发出任何请求前就失败；下载时如果没有设置，就匿名访问。</li>
               <li>先预检两个目标目录和同名文件：内容相同则跳过，同名但内容不同则停止，不会覆盖。</li>
@@ -487,6 +488,10 @@ python3 main.py upload --bios-archive ./0040.D82.7z --mmc-archive ./MMCFW_0.1022
           <article class="rule safe">
             <h3>暂存清理：只重试可恢复的锁定</h3>
             <p>遇到 Windows 文件锁定（错误 32、33）时，最多重试 5 次，每次间隔 2 秒。其他权限问题直接报错。</p>
+          </article>
+          <article class="rule safe">
+            <h3>加 --upload 时先查目标仓库</h3>
+            <p>同样的内容重新打包，SHA-256 也会变（7z 记录了文件修改时间）。如果不预先检查，已经发布过的版本会被白白重打一遍，而且上传时会因同名但内容不同而失败。所以加了 <code>--upload</code> 后，打包前会先查目标仓库：BIOS 已存在就不重新打包，改用与远端一致的本地副本，本地没有或不一致就下载远端那份并校验；MMC 已存在就不打包也不上传；两者都已存在则直接以 0 退出。token 缺失会在打包前就报错。不加 <code>--upload</code> 时不访问目标仓库。</p>
           </article>
           <article class="rule safe">
             <h3>上传失败：保留产物，单独重试</h3>

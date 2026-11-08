@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,16 +16,53 @@ from urllib.request import Request, urlopen
 from . import LOGGER
 from .artifactory import USER_AGENT, HttpClient
 
-UPLOAD_ROOT = "https://af01p-sc.devtools.intel.com/artifactory"
-UPLOAD_REPOSITORY = "DEG-IFWI-LOCAL"
-BIOS_FOLDER = "FIV_Portal/IFWI_CI/BIOSID"
-MMC_FOLDER = "FIV_Portal/IFWI_CI/MMC"
+DEFAULT_UPLOAD_URL = "https://af01p-sc.devtools.intel.com/artifactory/DEG-IFWI-LOCAL"
+DEFAULT_BIOS_PATH = "FIV_Portal/IFWI_CI/BIOSID"
+DEFAULT_MMC_PATH = "FIV_Portal/IFWI_CI/MMC"
 TOKEN_ENV = "IFWI_ARTIFACTORY_TOKEN"
 BIOS_NAME = re.compile(r"^\d{4}\.D\d+\.7z$")
 MMC_NAME = re.compile(r"^MMCFW_\d+\.\d+\.\d+\.7z$")
 TOKEN_FORMAT = re.compile(r"^[A-Za-z0-9._~+/-]+=*$")
 METADATA_TIMEOUT = 60
 UPLOAD_TIMEOUT = 1800
+
+
+@dataclass(frozen=True)
+class UploadTarget:
+    """Artifactory base (…/artifactory), repository and the two destination folders."""
+
+    root: str
+    repository: str
+    bios_folder: str
+    mmc_folder: str
+
+
+def _clean_folder(value: str, option: str) -> str:
+    parts = [part for part in value.replace("\\", "/").split("/") if part]
+    if not parts or any(part in (".", "..") for part in parts):
+        raise ValueError(f"Invalid {option}: {value!r}")
+    return "/".join(parts)
+
+
+def parse_upload_target(
+    url: str = DEFAULT_UPLOAD_URL,
+    bios_path: str = DEFAULT_BIOS_PATH,
+    mmc_path: str = DEFAULT_MMC_PATH,
+) -> UploadTarget:
+    """Split https://host/artifactory/<repository> into API root and repository."""
+    base, marker, rest = url.rstrip("/").partition("/artifactory/")
+    repository = rest.strip("/")
+    if not marker or not base.startswith(("https://", "http://")) or not repository             or "/" in repository:
+        raise ValueError(
+            "--upload-url must look like https://<host>/artifactory/<repository> "
+            f"(got {url!r}); put sub-folders in --upload-bios-path/--upload-mmc-path."
+        )
+    return UploadTarget(
+        root=f"{base}/artifactory",
+        repository=repository,
+        bios_folder=_clean_folder(bios_path, "--upload-bios-path"),
+        mmc_folder=_clean_folder(mmc_path, "--upload-mmc-path"),
+    )
 
 
 @dataclass
@@ -34,8 +72,8 @@ class UploadPlan:
     folder: str
     length: int
     sha256: str
-    root: str = UPLOAD_ROOT
-    repository: str = UPLOAD_REPOSITORY
+    root: str
+    repository: str
     exists: bool = False
 
     @property
@@ -170,13 +208,24 @@ def _assert_remote(status: int, body: str, plan: UploadPlan) -> None:
         )
 
 
-def build_plans(bios: Path, mmc: Path, root: str = UPLOAD_ROOT) -> list[UploadPlan]:
+def build_plans(
+    bios: Path | None, mmc: Path | None, target: UploadTarget,
+) -> list[UploadPlan]:
+    if bios is None and mmc is None:
+        raise ValueError("Nothing to upload: no BIOS or MMC archive given.")
     plans: list[UploadPlan] = []
-    for kind, path, folder in (("BIOS", bios, BIOS_FOLDER), ("MMC", mmc, MMC_FOLDER)):
+    for kind, path, folder in (
+        ("BIOS", bios, target.bios_folder), ("MMC", mmc, target.mmc_folder),
+    ):
+        if path is None:
+            continue
         length = path.stat().st_size
         if length <= 0:
             raise ValueError(f"Archive is empty: {path}")
-        plan = UploadPlan(kind, path, folder, length, sha256_file(path), root=root)
+        plan = UploadPlan(
+            kind, path, folder, length, sha256_file(path),
+            root=target.root, repository=target.repository,
+        )
         LOGGER.info(
             "UPLOAD_PLAN %s: %s -> %s; bytes=%s; SHA256=%s",
             kind, path, plan.upload_url, length, plan.sha256,
@@ -186,11 +235,14 @@ def build_plans(bios: Path, mmc: Path, root: str = UPLOAD_ROOT) -> list[UploadPl
 
 
 def upload_archives(
-    bios: Path, mmc: Path, *, dry_run: bool = False, root: str = UPLOAD_ROOT,
-    ca_bundle: Path | None = None,
+    bios: Path | None, mmc: Path | None, *, target: UploadTarget | None = None,
+    dry_run: bool = False, ca_bundle: Path | None = None,
 ) -> str:
-    """Upload the exact BIOS/MMC pair; returns 'preview' or 'completed'."""
-    plans = build_plans(bios, mmc, root)
+    """Upload the given BIOS and/or MMC archive; returns 'preview' or 'completed'.
+
+    Either archive may be None when it is already published in the target.
+    """
+    plans = build_plans(bios, mmc, target or parse_upload_target())
     if dry_run:
         LOGGER.info("Upload preview only; no token read and no HTTP requests made.")
         return "preview"
@@ -262,3 +314,109 @@ def upload_archives(
         uploaded, skipped, len(plans),
     )
     return "completed"
+
+
+# --- Target repository lookups (pre-check before packaging) -------------------
+
+@dataclass(frozen=True)
+class RemoteArchive:
+    kind: str
+    name: str
+    url: str
+    size: int
+    sha256: str
+
+
+class TargetRepository:
+    """Read-only view of the upload destination, used before packaging."""
+
+    def __init__(self, target: UploadTarget, client: HttpClient) -> None:
+        self.target = target
+        self.client = client
+
+    @classmethod
+    def connect(
+        cls, target: UploadTarget, ca_bundle: Path | None = None,
+    ) -> "TargetRepository":
+        return cls(target, HttpClient(token=read_token(), ca_bundle=ca_bundle))
+
+    def _folder(self, kind: str) -> str:
+        return self.target.bios_folder if kind == "BIOS" else self.target.mmc_folder
+
+    def stat(self, kind: str, name: str) -> RemoteArchive | None:
+        """Return the published archive's size/SHA-256, or None if it is absent."""
+        remote_path = f"{self._folder(kind)}/{name}"
+        root, repository = self.target.root, self.target.repository
+        status, body = _call(self.client, f"{root}/api/storage/{repository}/{remote_path}")
+        if status == 404:
+            LOGGER.info("Target check: %s %s is not published yet.", kind, name)
+            return None
+        if status != 200:
+            raise RuntimeError(
+                f"Cannot check {kind} {name} in the upload target (HTTP {status})."
+            )
+        metadata = json.loads(body)
+        sha256 = str((metadata.get("checksums") or {}).get("sha256", "")).lower()
+        if (
+            metadata.get("repo") != repository
+            or metadata.get("path") != f"/{remote_path}"
+            or not re.fullmatch(r"[0-9a-f]{64}", sha256)
+            or not str(metadata.get("size", "")).isdigit()
+        ):
+            raise RuntimeError(f"Unexpected metadata for published {kind} {name}.")
+        remote = RemoteArchive(
+            kind, name, f"{root}/{repository}/{remote_path}",
+            int(metadata["size"]), sha256,
+        )
+        LOGGER.info(
+            "Target check: %s %s is already published (bytes=%s, SHA256=%s).",
+            kind, name, remote.size, remote.sha256,
+        )
+        return remote
+
+    def obtain(self, remote: RemoteArchive, destination: Path) -> Path:
+        """Ensure destination holds exactly the published archive.
+
+        A matching local copy is reused; otherwise the published file is
+        downloaded, verified against size and SHA-256, then moved into place.
+        """
+        if (
+            destination.is_file()
+            and destination.stat().st_size == remote.size
+            and sha256_file(destination) == remote.sha256
+        ):
+            LOGGER.info("Using local %s identical to the published one: %s",
+                        remote.kind, destination)
+            return destination
+        if destination.exists():
+            LOGGER.warning(
+                "Local %s differs from the published one and will be replaced: %s",
+                remote.kind, destination,
+            )
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        LOGGER.info("Downloading published %s: %s", remote.kind, remote.url)
+        handle, temporary_name = tempfile.mkstemp(
+            prefix=f".{remote.name}.", dir=destination.parent
+        )
+        temporary = Path(temporary_name)
+        try:
+            digest = hashlib.sha256()
+            size = 0
+            with os.fdopen(handle, "wb") as output, urlopen(
+                self.client.request(remote.url), timeout=UPLOAD_TIMEOUT,
+                context=self.client.ssl_context(),
+            ) as response:
+                for block in iter(lambda: response.read(1024 * 1024), b""):
+                    output.write(block)
+                    digest.update(block)
+                    size += len(block)
+            if size != remote.size or digest.hexdigest() != remote.sha256:
+                raise RuntimeError(
+                    f"Downloaded {remote.kind} {remote.name} does not match the "
+                    "published size/SHA-256; nothing was replaced."
+                )
+            temporary.replace(destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+        LOGGER.info("Verified published %s saved to %s", remote.kind, destination)
+        return destination
