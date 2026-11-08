@@ -281,7 +281,10 @@ def package_bios(
     jobs: int,
     retries: int,
     dry_run: bool,
+    archive_threads: int | None = None,
 ) -> Path:
+    if archive_threads is not None and archive_threads < 1:
+        raise ValueError("--archive-threads must be at least 1.")
     destination = output_dir / build.package_name
     LOGGER.info("BIOS %s from %s; final archive: %s", build.bios_id, build_url, destination)
     planned = plan_components(components, build_url, http)
@@ -321,7 +324,7 @@ def package_bios(
         if not any(result.found for result in results):
             raise ValueError("No BIOS component files were found; nothing to publish.")
         archive = staging / build.package_name
-        create_archive(packaging, archive, seven_zip)
+        create_archive(packaging, archive, seven_zip, archive_threads=archive_threads)
         validate_archive(archive, seven_zip)
         archive.replace(destination)
     finally:

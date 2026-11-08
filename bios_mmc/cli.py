@@ -92,6 +92,11 @@ def add_packaging(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--seven-zip", type=Path, help="7-Zip executable path.")
     parser.add_argument(
+        "--archive-threads", type=int, metavar="N",
+        help="7-Zip threads for final BIOS/MMC compression (at least 1; "
+             "default: 7-Zip automatic selection). Does not limit extraction.",
+    )
+    parser.add_argument(
         "--dry-run", action="store_true",
         help="Resolve sources and print the plan without downloading firmware.",
     )
@@ -278,6 +283,8 @@ class Context:
 
 
 def prepare(args: argparse.Namespace) -> Context:
+    if args.archive_threads is not None and args.archive_threads < 1:
+        raise ValueError("--archive-threads must be at least 1.")
     # One Artifactory token for both servers: sent on downloads when set
     # (anonymous otherwise), and required for uploads.
     http = HttpClient(token=optional_token(), ca_bundle=args.ca_bundle)
@@ -323,6 +330,7 @@ def package_bios_step(
         jobs=args.jobs,
         retries=args.download_retry,
         dry_run=args.dry_run,
+        archive_threads=args.archive_threads,
     )
 
 
@@ -362,6 +370,7 @@ def mmc_step(
         seven_zip=context.seven_zip,
         dry_run=args.dry_run,
         version=version,
+        archive_threads=args.archive_threads,
     )
     if args.dry_run:
         report.planned(report.mmc, path)

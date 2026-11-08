@@ -85,14 +85,21 @@ def extract_archive(archive: Path, destination: Path, seven_zip: Path) -> None:
     )
 
 
-def create_archive(source_dir: Path, archive: Path, seven_zip: Path) -> None:
+def create_archive(
+    source_dir: Path, archive: Path, seven_zip: Path,
+    *, archive_threads: int | None = None,
+) -> None:
     """Archive the children of source_dir so they become the archive root."""
+    if archive_threads is not None and archive_threads < 1:
+        raise ValueError("--archive-threads must be at least 1.")
+    thread_options = [] if archive_threads is None else [f"-mmt={archive_threads}"]
     children = sorted(child.name for child in source_dir.iterdir())
     if not children:
         raise ValueError(f"Nothing to archive in {source_dir}")
     run_7zip(
         seven_zip,
-        ["a", "-t7z", "-y", "-bso0", "-bsp0", "--", str(archive), *children],
+        ["a", "-t7z", "-y", "-bso0", "-bsp0", *thread_options,
+         "--", str(archive), *children],
         cwd=source_dir,
     )
 

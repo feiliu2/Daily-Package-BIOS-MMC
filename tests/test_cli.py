@@ -91,6 +91,37 @@ class SevenZipDiscoveryTests(unittest.TestCase):
                 fsutil.find_seven_zip()
 
 
+class ArchiveThreadTests(unittest.TestCase):
+    def test_create_archive_sets_threads_only_when_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            (source / "payload.txt").write_bytes(b"payload")
+            for threads in (None, 1, 4):
+                with self.subTest(threads=threads), mock.patch.object(fsutil, "run_7zip") as run:
+                    fsutil.create_archive(
+                        source, source.parent / "out.7z", Path("7z"),
+                        archive_threads=threads,
+                    )
+                    arguments = run.call_args.args[1]
+                    self.assertEqual(
+                        [arg for arg in arguments if arg.startswith("-mmt=")],
+                        [] if threads is None else [f"-mmt={threads}"],
+                    )
+                    if threads is not None:
+                        self.assertLess(arguments.index(f"-mmt={threads}"), arguments.index("--"))
+                    self.assertEqual(run.call_args.kwargs["cwd"], source)
+
+    def test_create_archive_rejects_nonpositive_threads_before_running_7zip(self) -> None:
+        for threads in (0, -1):
+            with self.subTest(threads=threads), mock.patch.object(fsutil, "run_7zip") as run:
+                with self.assertRaisesRegex(ValueError, "--archive-threads"):
+                    fsutil.create_archive(
+                        Path("missing"), Path("out.7z"), Path("7z"),
+                        archive_threads=threads,
+                    )
+                run.assert_not_called()
+
+
 class OutputDirectoryTests(unittest.TestCase):
     def test_refuses_root_home_ancestors_and_protected_directories(self) -> None:
         home = Path.home().resolve()
@@ -171,6 +202,40 @@ class CliFixture(unittest.TestCase):
 
 
 class OrchestrationTests(CliFixture):
+    def test_archive_threads_default_preserves_automatic_selection(self) -> None:
+        self.assertEqual(cli.main(self.common), 0)
+        for name in ("package_bios", "package_mmc_fw"):
+            self.assertIsNone(self.mocks[name].call_args.kwargs["archive_threads"])
+
+    def test_archive_threads_reach_full_flow_and_packaging_subcommands(self) -> None:
+        for prefix, calls in (
+            ([], ("package_bios", "package_mmc_fw")),
+            (["bios"], ("package_bios",)),
+            (["mmc", "--bios-archive", str(self.root / "0040.D79.7z")],
+             ("package_mmc_fw",)),
+        ):
+            with self.subTest(prefix=prefix):
+                self.assertEqual(cli.main([*prefix, *self.common, "--archive-threads", "2"]), 0)
+                for name in calls:
+                    self.assertEqual(self.mocks[name].call_args.kwargs["archive_threads"], 2)
+
+    def test_invalid_archive_threads_fail_before_requests_or_packaging(self) -> None:
+        for prefix in ([], ["bios"], ["mmc", "--bios-archive", "BIOS.7z"]):
+            for threads in ("0", "-1"):
+                with self.subTest(prefix=prefix, threads=threads):
+                    with self.assertLogs("bios_packager", level="ERROR") as logged:
+                        self.assertEqual(cli.main([
+                            *prefix, *self.common, "--archive-threads", threads,
+                        ]), 1)
+                    self.assertIn("--archive-threads", "\n".join(logged.output))
+        self.mocks["get_text"].assert_not_called()
+        self.mocks["package_bios"].assert_not_called()
+        self.mocks["package_mmc_fw"].assert_not_called()
+
+    def test_archive_threads_require_an_integer(self) -> None:
+        with self.assertRaises(SystemExit), mock.patch("sys.stderr"):
+            cli.main([*self.common, "--archive-threads", "auto"])
+
     def test_default_run_packages_newest_bios_then_mmc_without_upload(self) -> None:
         self.assertEqual(cli.main(self.common), 0)
         bios_call = self.mocks["package_bios"].call_args

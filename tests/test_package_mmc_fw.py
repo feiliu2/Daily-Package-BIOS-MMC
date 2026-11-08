@@ -235,7 +235,9 @@ class MmcPackagingTests(unittest.TestCase):
         self.source.unlink(missing_ok=True)
         fsutil.create_archive(source_root, self.source, self.seven_zip)
 
-    def package(self, *, dry_run: bool = False) -> Path:
+    def package(
+        self, *, dry_run: bool = False, archive_threads: int | None = None,
+    ) -> Path:
         return mmc.package_mmc_fw(
             self.bios,
             branch_url=BASE_URL,
@@ -243,6 +245,7 @@ class MmcPackagingTests(unittest.TestCase):
             http=self.http,
             seven_zip=self.seven_zip,
             dry_run=dry_run,
+            archive_threads=archive_threads,
         )
 
     def assert_bios_and_outputs(self, *extra: str) -> None:
@@ -250,6 +253,25 @@ class MmcPackagingTests(unittest.TestCase):
         self.assertEqual(
             {path.name for path in self.output.iterdir()}, {self.bios.name, *extra}
         )
+
+    def test_archive_threads_apply_only_to_final_compression(self) -> None:
+        for threads in (None, 1, 2):
+            with self.subTest(threads=threads), mock.patch.object(
+                mmc, "run_7zip", wraps=mmc.run_7zip,
+            ) as run:
+                destination = self.package(archive_threads=threads)
+                commands = [call.args[1] for call in run.call_args_list]
+                compression = [args for args in commands if args[0] == "a"]
+                self.assertEqual(len(compression), 1)
+                self.assertEqual(
+                    [arg for arg in compression[0] if arg.startswith("-mmt=")],
+                    [] if threads is None else [f"-mmt={threads}"],
+                )
+                for args in commands:
+                    if args[0] != "a":
+                        self.assertFalse(any(arg.startswith("-mmt=") for arg in args))
+                fsutil.validate_archive(destination, self.seven_zip)
+                self.assert_bios_and_outputs(destination.name)
 
     def test_real_archives_keep_only_binaries_with_exact_names_and_contents(self) -> None:
         destination = self.package()

@@ -164,7 +164,9 @@ class RestructureTests(unittest.TestCase):
             lambda url, destination: shutil.copyfile(self.package, destination)
         )
 
-    def run_package(self, *, dry_run: bool = False) -> Path:
+    def run_package(
+        self, *, dry_run: bool = False, archive_threads: int | None = None,
+    ) -> Path:
         return bios.package_bios(
             BiosBuild("0040", "79"),
             build_url=BUILD_URL,
@@ -175,6 +177,7 @@ class RestructureTests(unittest.TestCase):
             jobs=2,
             retries=2,
             dry_run=dry_run,
+            archive_threads=archive_threads,
         )
 
     def contents(self, archive: Path) -> dict[str, bytes | None]:
@@ -187,6 +190,18 @@ class RestructureTests(unittest.TestCase):
             )
             for path in unpacked.rglob("*")
         }
+
+    def test_archive_threads_apply_only_to_final_compression(self) -> None:
+        with mock.patch.object(fsutil, "run_7zip", wraps=fsutil.run_7zip) as run:
+            archive = self.run_package(archive_threads=1)
+        commands = [call.args[1] for call in run.call_args_list]
+        compression = [args for args in commands if args[0] == "a"]
+        self.assertEqual(len(compression), 1)
+        self.assertIn("-mmt=1", compression[0])
+        for args in commands:
+            if args[0] != "a":
+                self.assertFalse(any(arg.startswith("-mmt=") for arg in args))
+        self.assertEqual(self.contents(archive)["Trunk_1P0_Debug/bios_fd/MAIN.fd"], b"main firmware")
 
     def test_restructures_like_the_original_and_reports_missing_component(self) -> None:
         with self.assertLogs("bios_packager", level="INFO") as logged:

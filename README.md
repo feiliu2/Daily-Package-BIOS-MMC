@@ -86,6 +86,7 @@ Useful options:
 | `--mapping-url` | — | Full GitHub contents API URL; overrides the three options above |
 | `--mapping-xlsx` | — | Use a local xlsx; no GitHub access. Cannot be combined with `--mapping-url` |
 | `--jobs` | CPU count | Parallel component downloads/extractions |
+| `--archive-threads N` | 7-Zip automatic selection | Threads for final BIOS/MMC compression (`-mmt=N`, N >= 1); available in the full flow, `bios` and `mmc`. Does not limit extraction or validation threads. |
 | `--download-retry` | 3 | Attempts per component download + extraction |
 | `--bios-branch` | `main` | BIOS branch folder (`main`, `dmr_ap1_b0_po_platform`, `oks_milestone_rel`, ...) |
 | `--bios-base-url` | `.../Daily/OakStreamRp/` | Folder containing the BIOS branch folders |

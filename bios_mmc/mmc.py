@@ -110,7 +110,11 @@ def package_mmc_fw(
     seven_zip: Path,
     dry_run: bool,
     version: str | None = None,
+    archive_threads: int | None = None,
 ) -> Path:
+    if archive_threads is not None and archive_threads < 1:
+        raise ValueError("--archive-threads must be at least 1.")
+    thread_options = [] if archive_threads is None else [f"-mmt={archive_threads}"]
     bios_archive = bios_archive.resolve()
     output_dir = output_dir.resolve()
     version = version or read_mmc_version(bios_archive, seven_zip)
@@ -158,7 +162,8 @@ def package_mmc_fw(
         run_7zip(
             seven_zip,
             [
-                "a", "-t7z", "-y", "-bso0", "-bsp0", "--", str(archive),
+                "a", "-t7z", "-y", "-bso0", "-bsp0", *thread_options,
+                "--", str(archive),
                 package_name,
             ],
             cwd=workspace,
